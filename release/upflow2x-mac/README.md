@@ -4,6 +4,8 @@
 
 Smooth 2x for hand-drawn animation, inside DaVinci Resolve Studio.
 
+**[Download it for Windows or macOS](https://github.com/sidebandstudio/Upflow2x/releases/latest)**, then follow [Install](#install).
+
 Anime is drawn on 2s or 3s: the artist draws twelve pictures a second, or
 eight, and each one is held for two or three frames to fill 24fps. That is why anime looks
 stepped when you slow it down, and why running it straight through a frame
