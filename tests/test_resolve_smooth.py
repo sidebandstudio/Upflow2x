@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -100,13 +101,31 @@ def test_renders_go_beside_resolves_cache_in_a_folder_per_project(tmp_path):
     assert smooth.default_output_dir("Show", str(cache)) == tmp_path / "work" / "Upflow2x" / "Show"
 
 
+def resolves_folder(home: Path) -> Path:
+    """DaVinci Resolve's own folder, with the home and APPDATA the tests set."""
+    if sys.platform.startswith("win"):
+        return home / "AppData" / "Roaming" / "Blackmagic Design" / "DaVinci Resolve" / "Support"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Blackmagic Design" / "DaVinci Resolve"
+    return home / ".local" / "share" / "DaVinciResolve"
+
+
 @pytest.mark.parametrize("cache", [None, "", "CacheClip"])
-def test_without_a_cache_folder_renders_go_in_videos(monkeypatch, tmp_path, cache):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    videos = "Movies" if sys.platform == "darwin" else "Videos"
-    assert smooth.default_output_dir("Show", cache) == tmp_path / videos / "Upflow2x" / "Show"
-    assert smooth.default_output_dir(None, cache) == tmp_path / videos / "Upflow2x"
+def test_without_a_cache_folder_renders_go_in_resolves_own_folder(tmp_path, cache):
+    """It is the one folder every Resolve has."""
+    folder = resolves_folder(tmp_path / "user-home")
+    assert smooth.default_output_dir("Show", cache) == folder / "Upflow2x" / "Show"
+    assert smooth.default_output_dir(None, cache) == folder / "Upflow2x"
+
+
+def test_a_cache_in_onedrive_leaves_renders_in_resolves_own_folder(monkeypatch, tmp_path):
+    """OneDrive would upload every frame, gigabytes for a few seconds of 4K."""
+    monkeypatch.setenv("OneDrive", str(tmp_path / "OneDrive"))
+    cache = tmp_path / "OneDrive" / "Videos" / "CacheClip"
+    folder = resolves_folder(tmp_path / "user-home")
+    assert smooth.default_output_dir("Show", str(cache)) == folder / "Upflow2x" / "Show"
+    beside = tmp_path / "Videos" / "CacheClip"
+    assert smooth.default_output_dir("Show", str(beside)) == tmp_path / "Videos" / "Upflow2x" / "Show"
 
 
 def test_a_project_name_becomes_a_folder_windows_can_make(tmp_path):
@@ -124,15 +143,46 @@ def test_a_project_named_like_a_device_still_gets_a_folder(tmp_path, project, fo
     assert out.parent == tmp_path / "Upflow2x" / folder and out.is_dir()
 
 
-def test_a_cache_on_a_missing_drive_leaves_renders_in_videos(make_anime, monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+def test_another_spelling_of_a_onedrive_cache_is_still_onedrive(monkeypatch, tmp_path):
+    """A .. in the path, or a short 8.3 name, hid that it was in OneDrive."""
+    onedrive = tmp_path / "OneDrive"
+    (onedrive / "Videos").mkdir(parents=True)
+    (tmp_path / "Other").mkdir()
+    monkeypatch.setenv("OneDrive", str(onedrive))
+    folder = resolves_folder(tmp_path / "user-home") / "Upflow2x" / "Show"
+    dotted = os.path.join(str(tmp_path), "Other", "..", "OneDrive", "Videos", "CacheClip")
+    assert smooth.default_output_dir("Show", dotted) == folder
+    if sys.platform.startswith("win"):
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        ctypes.windll.kernel32.GetShortPathNameW(str(onedrive / "Videos"), buf, 1024)
+        if buf.value and buf.value.lower() != str(onedrive / "Videos").lower():
+            assert smooth.default_output_dir("Show", buf.value + "\\CacheClip") == folder
+
+
+def test_a_folder_that_refuses_files_leaves_renders_in_resolves_own_folder(monkeypatch, tmp_path):
+    """mkdir succeeds on a folder that is already there, whatever it allows."""
+    beside = tmp_path / "work" / "Upflow2x" / "Show"
+    beside.mkdir(parents=True)
+    real = smooth.tempfile.TemporaryFile
+
+    def refuse(*args, dir=None, **kwargs):
+        if dir is not None and Path(dir) == beside:
+            raise PermissionError("Access is denied")
+        return real(*args, dir=dir, **kwargs)
+
+    monkeypatch.setattr(smooth.tempfile, "TemporaryFile", refuse)
+    out = smooth._output_path(tmp_path / "clip.avi", None, "png", project="Show",
+                              cache=str(tmp_path / "work" / "CacheClip"))
+    assert out.parent == resolves_folder(tmp_path / "user-home") / "Upflow2x" / "Show"
+
+
+def test_a_cache_on_a_missing_drive_leaves_renders_in_resolves_own_folder(tmp_path):
     blocker = tmp_path / "drive"
     blocker.write_text("a file where the cache's drive would be")
     out = smooth._output_path(tmp_path / "clip.avi", None, "png", project="Show",
                               cache=str(blocker / "CacheClip"))
-    videos = "Movies" if sys.platform == "darwin" else "Videos"
-    assert out.parent == tmp_path / "home" / videos / "Upflow2x" / "Show"
+    assert out.parent == resolves_folder(tmp_path / "user-home") / "Upflow2x" / "Show"
 
 
 def test_the_default_output_is_a_lossless_sequence(anime_in_resolve, monkeypatch,

@@ -176,10 +176,13 @@ Renders go in an `Upflow2x` folder beside the project's cache folder, with a
 folder for each project. The cache folder is the Cache files location in
 Project Settings → Master Settings → Working Folders. With the cache in
 `D:\Resolve\CacheClip`, a project called Episode 1 renders to
-`D:\Resolve\Upflow2x\Episode 1`. If the project has no cache folder, or its
-drive is unplugged, renders go in `Videos\Upflow2x` on Windows or
-`Movies/Upflow2x` on a Mac, again a folder for each project. Up to v0.5.0
-each render was saved beside its clip, and those stay where they are.
+`D:\Resolve\Upflow2x\Episode 1`. If the project has no cache folder, its
+drive is unplugged or read only, or it is in OneDrive, renders go in
+Resolve's own folder instead, again a folder for each project:
+`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows, or
+`~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on
+a Mac. Show in Folder opens it. Up to v0.5.0 each render was saved beside its
+clip, and those stay where they are.
 
 A 4K image sequence takes about 6 MB a frame, so a few seconds of footage can
 fill a gigabyte. Upflow2x never deletes a render, so delete a project's
@@ -229,12 +232,16 @@ python -m Stages.resolve_smooth --video shot.mov --base-hold 3 --no-interpolate
 python -m Stages.resolve_smooth --video grainy.mov --grain
 ```
 
-`--video` skips Resolve entirely and writes the result to `Videos/Upflow2x`,
-`Movies/Upflow2x` on a Mac, or to `--output-dir`. `--project` and
-`--cache-dir` pick the folder the way the panel does. Add `--network-upscale`
-and, where Real-ESRGAN runs on a GPU, the render is 2x. Without it, or without
-a GPU, the 2x upscale is Resolve's Super Scale, applied when the panel imports
-the result, so a `--video` run stays at source resolution.
+`--video` skips Resolve entirely and writes the result to `--output-dir`. Without
+it, the result goes in an `Upflow2x` folder beside `--cache-dir`, Resolve's cache
+folder, in a folder named by `--project`. With no cache folder, or one in
+OneDrive, it goes in Resolve's own folder instead,
+`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or
+`~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a
+Mac. The panel passes the project and cache folder itself. Add `--network-upscale` and, where
+Real-ESRGAN runs on a GPU, the render is 2x. Without it, or without a GPU, the
+2x upscale is Resolve's Super Scale, applied when the panel imports the result,
+so a `--video` run stays at source resolution.
 
 Add `--json` and stdout carries a single JSON summary, errors included, while
 progress goes to stderr.

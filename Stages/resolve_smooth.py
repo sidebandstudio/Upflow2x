@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -18,6 +20,8 @@ from typing import Optional, Tuple
 
 # numpy and OpenCV load through these. A Python without them must still be
 # able to tell the panel so, or the panel waits on a run that never started.
+from Installer.install_upflow2x import _resolve_scripts_root
+
 try:
     from Pipeline import resolve_bridge as bridge
     from Pipeline.config import Upflow2xConfig
@@ -174,19 +178,30 @@ _DEVICES = {"CON", "PRN", "AUX", "NUL"} | {f"{port}{n}" for port in ("COM", "LPT
                                            for n in range(1, 10)}
 
 
+def _in_onedrive(path: Path) -> bool:
+    """Whether OneDrive syncs `path`, from the folders it sets in the environment.
+    Both are resolved first, so a short 8.3 name or a .. cannot hide it."""
+    path = path.resolve()
+    roots = [os.environ.get(key) for key in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")]
+    return any(root and (path == Path(root).resolve() or Path(root).resolve() in path.parents)
+               for root in roots)
+
+
 def default_output_dir(project: Optional[str] = None, cache: Optional[str] = None) -> Path:
     """Where renders go unless the panel is told otherwise: an Upflow2x folder
     beside Resolve's cache folder, with a folder for each project.
 
     Beside each clip, a render landed in whatever folder the clip came from,
     among the recordings. Resolve keeps its own working files in its cache
-    folder. Where that is not set, renders go in the Videos folder, or Movies
-    on a Mac.
+    folder, by default Videos\\CacheClip. Where a project has none, or it is
+    in OneDrive, which would upload gigabytes of frames, renders go in
+    Resolve's own folder, the one its scripts are installed in.
     """
-    if cache and Path(cache).is_absolute():
+    if cache and Path(cache).is_absolute() and not _in_onedrive(Path(cache).parent):
         root = Path(cache).parent
     else:
-        root = Path.home() / ("Movies" if sys.platform == "darwin" else "Videos")
+        # Support/Fusion/Scripts on Windows, Fusion/Scripts on a Mac.
+        root = _resolve_scripts_root().parent.parent
     # A project name can hold anything. A folder name on Windows cannot, nor
     # can it be a device's, like NUL or COM1, even with an extension.
     name = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in project or "")
@@ -206,8 +221,10 @@ def _output_path(source: Path, output_dir: Optional[str], fmt: str,
         base = default_output_dir(project, cache)
         try:
             base.mkdir(parents=True, exist_ok=True)
+            # A folder that is already there can still refuse files.
+            tempfile.TemporaryFile(dir=base).close()
         except OSError:
-            # The cache can be on a drive that is not plugged in.
+            # The cache can be on a drive that is not plugged in, or read only.
             base = default_output_dir(project)
             base.mkdir(parents=True, exist_ok=True)
     suffix = FORMATS.get(fmt, "")
@@ -266,7 +283,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Seconds into the file where the clip ends.")
     parser.add_argument("--output-dir", default=None,
                         help="Where to write the result (default: an Upflow2x "
-                             "folder beside Resolve's cache folder, or in Videos).")
+                             "folder beside Resolve's cache folder, or in Resolve's own "
+                             "folder).")
     parser.add_argument("--project", default=None,
                         help="The Resolve project's name. Without --output-dir, its "
                              "renders get a folder of their own.")
