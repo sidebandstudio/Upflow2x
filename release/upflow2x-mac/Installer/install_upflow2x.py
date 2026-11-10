@@ -15,7 +15,8 @@ DEFAULT_UPDATE_URL = (
 REQUIREMENTS = (
     "DaVinci Resolve Studio 18 or newer. The free edition blocks script panels.",
     "Windows 10 or 11, or macOS 12 or newer.",
-    "Python 3.10 to 3.14. Older Macs need an older one, see the Mac guide.",
+    "Python 3.10 to 3.14. An Intel Mac or macOS 13 needs 3.13 or older, and macOS 12 "
+    "needs 3.12 or older.",
     "A DirectX 12 GPU on Windows draws and upscales. Without one, and on a Mac, "
     "the in-betweens run on the CPU and Super Scale upscales.",
     "The first render downloads about 50 MB.",

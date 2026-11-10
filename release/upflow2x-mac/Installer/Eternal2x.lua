@@ -938,7 +938,8 @@ local TIPS = {
     needs = "Upflow2x needs:\n"
         .. "DaVinci Resolve Studio 18 or newer. The free edition blocks script panels.\n"
         .. "Windows 10 or 11, or macOS 12 or newer.\n"
-        .. "Python 3.10 to 3.14. Older Macs need an older one, see the Mac guide.\n"
+        .. "Python 3.10 to 3.14. An Intel Mac or macOS 13 needs 3.13 or older, and macOS 12 "
+        .. "needs 3.12 or older.\n"
         .. "A DirectX 12 GPU on Windows draws and upscales. Without one, and on a Mac, "
         .. "the in-betweens run on the CPU and Super Scale upscales.\n"
         .. "The first render downloads about 50 MB.",
