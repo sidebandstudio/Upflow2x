@@ -201,10 +201,15 @@ def test_the_network_and_lanczos_never_both_scale(twice_as_big, monkeypatch, mak
     assert _render(make_anime, tmp_path / "b", network_upscale=True).width == 200
 
 
-def test_only_the_drawings_are_upscaled(twice_as_big, make_anime, tmp_path, read_frames):
+@pytest.mark.parametrize("name", ["out", "out.mkv"])
+def test_only_the_drawings_are_upscaled(twice_as_big, make_anime, tmp_path, read_frames, name):
     """Upscaling every in-between too took most of a render's time. They are
-    drawn at 2x from the drawings instead."""
-    result = _render(make_anime, tmp_path, network_upscale=True, upscale_enabled=False)
+    drawn at 2x from the drawings instead, in the pool, and a video still gets
+    them in order."""
+    src = make_anime(holds=(2,) * 6)
+    plan, _, _ = analyse_video(src, Upflow2xConfig())
+    result = render_plan(src, plan, tmp_path / name, Upflow2xConfig(
+        network_upscale=True, upscale_enabled=False), sequence=name == "out")
     frames = read_frames(result.output)
     assert twice_as_big.drawn == 6 and len(frames) == 12
     between = cv2.addWeighted(frames[0], 0.5, frames[2], 0.5, 0)

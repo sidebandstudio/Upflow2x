@@ -365,6 +365,23 @@ def test_a_model_without_a_graph_is_refused():
         rife._with_outputs(b"\x08\x07", ["m"])
 
 
+def test_in_a_pool_the_2x_in_betweens_are_the_same_frames():
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    import cv2
+
+    from tests.fake_rife import StandInRife
+    a, b = cel(80, 120), cel(110, 120)
+    big = tuple(cv2.resize(f, None, fx=2, fy=2) for f in (a, b))
+    times = [0.0, 0.05, 0.1, 0.4, 0.9, 1.0]
+    plain = StandInRife().interpolate_pair(a, b, times, big=big)
+    with ThreadPoolExecutor(2) as pool:
+        drawn = StandInRife().interpolate_pair(a, b, times, big=big, pool=pool)
+        assert isinstance(drawn[1], Future)
+        drawn = [f.result() if isinstance(f, Future) else f for f in drawn]
+    assert all(np.array_equal(x, y) for x, y in zip(plain, drawn))
+
+
 def test_at_2x_a_cut_holds_the_first_drawing_as_given():
     from tests.fake_rife import StandInRife
     a, b = cel(140, 120), city()

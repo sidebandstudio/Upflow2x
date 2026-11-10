@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -184,6 +185,11 @@ def ensure_model(progress: Optional[ProgressFn] = None, path: Path = MODEL_PATH,
         return path
     finally:
         part.unlink(missing_ok=True)
+
+
+def _ready(frame) -> np.ndarray:
+    """A frame, waiting for it if it is still being drawn."""
+    return frame.result() if isinstance(frame, Future) else frame
 
 
 def _varint(n: int) -> bytes:
@@ -360,7 +366,7 @@ class Rife:
 
     def interpolate_pair(self, a: np.ndarray, b: np.ndarray, times: List[float],
                          unrelated: Optional[bool] = None,
-                         big: Optional[tuple] = None) -> List[np.ndarray]:
+                         big: Optional[tuple] = None, pool=None) -> list:
         """In-betweens for `times` (each in 0..1) between drawings a and b.
 
         t == 0 returns `a` untouched and t == 1 returns `b` untouched, so real
@@ -374,7 +380,8 @@ class Rife:
         With `big`, a and b upscaled 2x, every frame comes back at 2x: the
         drawings as given, and each in-between drawn from them with the
         network's motion. Upscaling the in-betweens one by one instead took
-        most of a render's time.
+        most of a render's time. With `pool` too, those in-betweens come back
+        as Futures drawn there, so the network starts on the next meanwhile.
         """
         if not times:
             return []
@@ -394,16 +401,23 @@ class Rife:
             elif t >= 1.0 - _ROUNDING:
                 out.append(ends[1].copy())
             else:
-                out.append(self._between(a, b, t, big))
+                out.append(self._between(a, b, t, big, pool))
         return out
 
-    def _step(self, lo: tuple, hi: tuple, t: float) -> tuple:
+    def _step(self, lo: tuple, hi: tuple, t: float, pool=None) -> tuple:
         """The frame at t between two (frame, 2x frame) pairs, as another."""
         frame, (flow, mask) = self._run(lo[0], hi[0], t)
-        return frame, (None if lo[1] is None else _warp2x(lo[1], hi[1], flow, mask))
+        if lo[1] is None:
+            return frame, None
+        if pool is None:
+            return frame, _warp2x(lo[1], hi[1], flow, mask)
+        # Either end may be a halfway frame still being drawn. It went into
+        # the pool first, so it is drawn or being drawn by the time this runs.
+        big0, big1 = lo[1], hi[1]
+        return frame, pool.submit(lambda: _warp2x(_ready(big0), _ready(big1), flow, mask))
 
     def _between(self, a: np.ndarray, b: np.ndarray, t: float,
-                 big: Optional[tuple] = None) -> np.ndarray:
+                 big: Optional[tuple] = None, pool=None):
         """The frame at t between a and b, asking the network only for 0.25 to 0.75."""
         ends = big or (None, None)
         pair = (a, b, ends[0])
@@ -418,11 +432,11 @@ class Rife:
             # distance from the nearer end. A gap of 5000 frames slowed three
             # times needs 12 halvings and keeps 23 halfway frames.
             if _EVEN_FROM <= local <= 1.0 - _EVEN_FROM:
-                return self._step(known[lo], known[hi], local)[which]
+                return self._step(known[lo], known[hi], local, pool)[which]
             if hi - lo < 2.0 ** -30:
                 # Only rounding gets here, where both ends are one picture.
-                return (known[lo] if local < 0.5 else known[hi])[which].copy()
+                return _ready((known[lo] if local < 0.5 else known[hi])[which]).copy()
             mid = (lo + hi) / 2.0
             if mid not in known:
-                known[mid] = self._step(known[lo], known[hi], 0.5)
+                known[mid] = self._step(known[lo], known[hi], 0.5, pool)
             lo, hi = (lo, mid) if local < 0.5 else (mid, hi)
