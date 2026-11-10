@@ -278,7 +278,7 @@ afterwards.
 | Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel says so and shows its last error. If a run was interrupted, press **Reset**. |
 | Resolve would not import the render | The render still finished. The panel prints where it is, so drag it into your media pool. Switching Output to `Image sequence` usually avoids this. |
 | Upscale skipped | Without a GPU the upscale is Super Scale, which needs Resolve Studio. |
-| Something else | Email the panel's status text and the `.upflow2x_last_run.log` file from the plugin folder, `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. |
+| Something else | Email the panel's status text and the `.upflow2x_last_run.log` file from the plugin folder. Setup puts it in `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in. |
 
 ## Development
 
