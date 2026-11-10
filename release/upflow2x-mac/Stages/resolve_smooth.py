@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -178,9 +179,12 @@ _DEVICES = {"CON", "PRN", "AUX", "NUL"} | {f"{port}{n}" for port in ("COM", "LPT
 
 
 def _in_onedrive(path: Path) -> bool:
-    """Whether OneDrive syncs `path`, from the folders it sets in the environment."""
+    """Whether OneDrive syncs `path`, from the folders it sets in the environment.
+    Both are resolved first, so a short 8.3 name or a .. cannot hide it."""
+    path = path.resolve()
     roots = [os.environ.get(key) for key in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")]
-    return any(root and (path == Path(root) or Path(root) in path.parents) for root in roots)
+    return any(root and (path == Path(root).resolve() or Path(root).resolve() in path.parents)
+               for root in roots)
 
 
 def default_output_dir(project: Optional[str] = None, cache: Optional[str] = None) -> Path:
@@ -193,7 +197,7 @@ def default_output_dir(project: Optional[str] = None, cache: Optional[str] = Non
     in OneDrive, which would upload gigabytes of frames, renders go in
     Resolve's own folder, the one its scripts are installed in.
     """
-    if cache and Path(cache).is_absolute() and not _in_onedrive(Path(cache)):
+    if cache and Path(cache).is_absolute() and not _in_onedrive(Path(cache).parent):
         root = Path(cache).parent
     else:
         # Support/Fusion/Scripts on Windows, Fusion/Scripts on a Mac.
@@ -217,8 +221,10 @@ def _output_path(source: Path, output_dir: Optional[str], fmt: str,
         base = default_output_dir(project, cache)
         try:
             base.mkdir(parents=True, exist_ok=True)
+            # A folder that is already there can still refuse files.
+            tempfile.TemporaryFile(dir=base).close()
         except OSError:
-            # The cache can be on a drive that is not plugged in.
+            # The cache can be on a drive that is not plugged in, or read only.
             base = default_output_dir(project)
             base.mkdir(parents=True, exist_ok=True)
     suffix = FORMATS.get(fmt, "")
