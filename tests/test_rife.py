@@ -259,11 +259,13 @@ class _FakeSession:
     def get_inputs(self):
         return [type("Input", (), {"name": "input"})()]
 
-    def run(self, _names, feed):
+    def run(self, names, feed):
         if self.fail_on_gpu_run and "DmlExecutionProvider" in self.providers:
             raise RuntimeError("E_OUTOFMEMORY")
         x = feed["input"]
-        return [x[:, :3], np.zeros_like(x[:, :4]), x[:, 6:7]]
+        out = {"output": x[:, :3], "/Add_7_output_0": np.zeros_like(x[:, :4]),
+               "/Sigmoid_output_0": x[:, 6:7]}
+        return [out[name] for name in names or out]
 
 
 def _fake_ort(monkeypatch, tmp_path, **fail):
@@ -329,7 +331,8 @@ def _net_returning(monkeypatch, tmp_path, output):
     and no motion."""
     _fake_ort(monkeypatch, tmp_path)
     net = rife.Rife()
-    monkeypatch.setattr(net, "_infer", lambda x: [output(x), np.zeros_like(x[:, :4]), x[:, 6:7]])
+    monkeypatch.setattr(net, "_infer",
+                        lambda x, names=None: [output(x), np.zeros_like(x[:, :4]), x[:, 6:7]])
     return net
 
 
@@ -350,6 +353,21 @@ def test_a_good_frame_from_the_model_is_used(monkeypatch, tmp_path):
     net = _net_returning(monkeypatch, tmp_path, lambda x: x[:, :3])
     out = net.interpolate_pair(cel(120, 120), cel(150, 116), [0.5])[0]
     assert np.array_equal(out, cel(120, 120))
+
+
+def test_at_2x_an_in_between_only_brings_back_the_motion(monkeypatch, tmp_path):
+    """Its 1x frame is never used, and copying it back from the GPU took time.
+    A halfway frame is given to the network again, so it comes back whole."""
+    _fake_ort(monkeypatch, tmp_path)
+    net = rife.Rife()
+    asked, run = [], net.session.run
+    net.session.run = lambda names, feed: asked.append(names) or run(names, feed)
+    a, b = cel(120, 120), cel(150, 116)
+    big = tuple(np.repeat(np.repeat(f, 2, 0), 2, 1) for f in (a, b))
+    out = net.interpolate_pair(a, b, [0.1, 0.5], big=big)
+    motion = list(rife._MOTION)
+    assert asked == [None, None, motion, motion]
+    assert all(f.shape == big[0].shape for f in out)
 
 
 def test_the_motion_is_added_to_the_models_outputs():

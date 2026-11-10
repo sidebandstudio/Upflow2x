@@ -21,9 +21,10 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+from collections import deque
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Deque, List, Optional
 
 import cv2
 import numpy as np
@@ -288,6 +289,9 @@ class Rife:
         ort = ensure_runtime(progress)
         model = ensure_model(progress)
         self._ort, self._model = ort, _with_outputs(Path(model).read_bytes(), _MOTION)
+        # The last few frames given to the network, as it takes them. A pair's
+        # drawings and halfway frames come back again and again.
+        self._seen: Deque[tuple] = deque(maxlen=4)
         # DirectML runs it on any Windows GPU, AMD included, when the
         # onnxruntime-directml package is the one installed.
         self.on_gpu = "DmlExecutionProvider" in ort.get_available_providers()
@@ -321,9 +325,9 @@ class Rife:
             providers = ["CPUExecutionProvider"]
         return ort.InferenceSession(self._model, options, providers=providers)
 
-    def _infer(self, x: np.ndarray) -> list:
+    def _infer(self, x: np.ndarray, names: Optional[List[str]] = None) -> list:
         try:
-            return self.session.run(None, {self.input: x})
+            return self.session.run(names, {self.input: x})
         except Exception:  # onnxruntime raises its own exception types
             if not self.on_gpu:
                 raise
@@ -331,38 +335,50 @@ class Rife:
             # more than is left. The CPU is slower but has room.
             self.on_gpu = False
             self.session = self._session()
-            return self.session.run(None, {self.input: x})
+            return self.session.run(names, {self.input: x})
 
-    def _run(self, a: np.ndarray, b: np.ndarray, t: float):
+    def _planes(self, frame: np.ndarray, ph: int, pw: int) -> np.ndarray:
+        """`frame` as the network takes it: padded RGB planes from 0 to 1."""
+        for given, planes in self._seen:
+            if given is frame:
+                return planes
+        padded = cv2.copyMakeBorder(frame, 0, ph, 0, pw, cv2.BORDER_REPLICATE)
+        planes = np.empty((3,) + padded.shape[:2], np.float32)
+        for c in range(3):
+            # From OpenCV's BGR from 0 to 255.
+            cv2.multiply(cv2.extractChannel(padded, 2 - c), 1.0 / 255.0, dst=planes[c],
+                         dtype=cv2.CV_32F)
+        self._seen.append((frame, planes))
+        return planes
+
+    def _run(self, a: np.ndarray, b: np.ndarray, t: float, frame: bool = True):
         """The network's frame at t, and the motion it drew it with: for each
         pixel, how far it comes from in a and in b (4 x h x w), and how much
-        of a it takes (h x w)."""
+        of a it takes (h x w). Without `frame`, only the motion, which spares
+        copying the frame back from the GPU."""
         h, w = a.shape[:2]
         ph, pw = -h % _PAD, -w % _PAD
         if self._input is None or self._input[0] is not a or self._input[1] is not b:
             x = np.empty((1, 7, h + ph, w + pw), np.float32)
-            for k, frame in enumerate((a, b)):
-                padded = cv2.copyMakeBorder(frame, 0, ph, 0, pw, cv2.BORDER_REPLICATE)
-                for c in range(3):
-                    # RGB from 0 to 1, from OpenCV's BGR from 0 to 255.
-                    cv2.multiply(cv2.extractChannel(padded, 2 - c), 1.0 / 255.0,
-                                 dst=x[0, 3 * k + c], dtype=cv2.CV_32F)
+            x[0, :3], x[0, 3:6] = self._planes(a, ph, pw), self._planes(b, ph, pw)
             self._input = (a, b, x)
         x = self._input[2]
         x[0, 6] = t
-        y = self._infer(x)
+        y = self._infer(x, None if frame else list(_MOTION))
         # A frame of another size would be written as it came, and a video
         # writer drops it without a word, so the render would come out short.
-        expected = [(1, c, h + ph, w + pw) for c in (3, 4, 1)]
+        expected = [(1, c, h + ph, w + pw) for c in ((3, 4, 1) if frame else (4, 1))]
         shapes = [getattr(part, "shape", None) for part in y]
         if shapes != expected or not all(np.isfinite(part).all() for part in y):
             raise AIUnavailable(f"The AI model returned a broken frame (shape "
                                 f"{shapes[0] if shapes else '?'}, expected {expected[0]}), so "
                                 f"the render was stopped.")
+        motion = (y[-2][0, :, :h, :w], y[-1][0, 0, :h, :w])
+        if not frame:
+            return None, motion
         # Rounded and held to 0..255 as it goes back to 8 bits.
-        frame = cv2.merge([cv2.multiply(y[0][0, c, :h, :w], 255.0, dtype=cv2.CV_8U)
-                           for c in (2, 1, 0)])
-        return frame, (y[1][0, :, :h, :w], y[2][0, 0, :h, :w])
+        return cv2.merge([cv2.multiply(y[0][0, c, :h, :w], 255.0, dtype=cv2.CV_8U)
+                          for c in (2, 1, 0)]), motion
 
     def interpolate_pair(self, a: np.ndarray, b: np.ndarray, times: List[float],
                          unrelated: Optional[bool] = None,
@@ -404,9 +420,10 @@ class Rife:
                 out.append(self._between(a, b, t, big, pool))
         return out
 
-    def _step(self, lo: tuple, hi: tuple, t: float, pool=None) -> tuple:
-        """The frame at t between two (frame, 2x frame) pairs, as another."""
-        frame, (flow, mask) = self._run(lo[0], hi[0], t)
+    def _step(self, lo: tuple, hi: tuple, t: float, pool=None, small: bool = True) -> tuple:
+        """The frame at t between two (frame, 2x frame) pairs, as another.
+        Without `small`, the 1x frame is left out where there is a 2x one."""
+        frame, (flow, mask) = self._run(lo[0], hi[0], t, small or lo[1] is None)
         if lo[1] is None:
             return frame, None
         if pool is None:
@@ -432,7 +449,8 @@ class Rife:
             # distance from the nearer end. A gap of 5000 frames slowed three
             # times needs 12 halvings and keeps 23 halfway frames.
             if _EVEN_FROM <= local <= 1.0 - _EVEN_FROM:
-                return self._step(known[lo], known[hi], local, pool)[which]
+                # Only a halfway frame is ever given back to the network.
+                return self._step(known[lo], known[hi], local, pool, small=big is None)[which]
             if hi - lo < 2.0 ** -30:
                 # Only rounding gets here, where both ends are one picture.
                 return _ready((known[lo] if local < 0.5 else known[hi])[which]).copy()

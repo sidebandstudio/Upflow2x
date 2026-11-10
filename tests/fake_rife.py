@@ -26,7 +26,7 @@ class StandInRife(rife.Rife):
         StandInRife.made += 1
         self.on_gpu = False
 
-    def _run(self, a, b, t):
+    def _run(self, a, b, t, frame=True):
         return cv2.addWeighted(a, 1.0 - t, b, t, 0), still(a, t)
 
 
@@ -44,7 +44,7 @@ class Rife(_rife_real.Rife):
     def __init__(self, progress=None):
         self.on_gpu = False
 
-    def _run(self, a, b, t):
+    def _run(self, a, b, t, frame=True):
         h, w = a.shape[:2]
         return cv2.addWeighted(a, 1.0 - t, b, t, 0), (np.zeros((4, h, w), np.float32),
                                                       np.full((h, w), 1.0 - t, np.float32))
