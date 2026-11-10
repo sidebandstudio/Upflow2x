@@ -67,7 +67,8 @@ which is where retimers tear, melt and double lines.
 - Windows 10 or 11, or macOS 12 or newer.
 - Python 3.10 to 3.14 on your PATH, from
   [python.org](https://www.python.org/downloads/latest/python3.14/). 3.15 is too
-  new for the AI runtime, and on an Intel Mac it stops at 3.13.
+  new for the AI runtime. An Intel Mac or macOS 13 needs 3.13 or older, and
+  macOS 12 needs 3.12 or older.
 - A DirectX 12 GPU on Windows draws the in-betweens and the 2x upscale. Without
   one, and on a Mac, the in-betweens run on the CPU and Super Scale upscales.
 - The first render downloads about 50 MB.

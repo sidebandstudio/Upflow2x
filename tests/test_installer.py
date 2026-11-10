@@ -383,6 +383,21 @@ def test_the_software_needs_what_the_site_says(repo_root):
         assert need in listed and need in readme, f"{need!r} is missing from the software"
 
 
+@pytest.mark.parametrize("mac,help_says,software_says", [
+    ("Intel", "3.10 to 3.13 on Intel", "An Intel Mac or macOS 13 needs 3.13 or older"),
+    ("macOS 13", "On macOS 13, use 3.10 to 3.13", "An Intel Mac or macOS 13 needs 3.13 or older"),
+    ("macOS 12", "on macOS 12, 3.10 to 3.12", "macOS 12 needs 3.12 or older"),
+])
+def test_the_software_gives_the_python_limits_the_mac_guide_does(repo_root, mac, help_says,
+                                                                  software_says):
+    """ONNX Runtime has no build past these, so a Mac on a newer Python draws
+    no in-betweens."""
+    guide = " ".join((repo_root / "docs" / "help.html").read_text(encoding="utf-8").split())
+    readme = " ".join((repo_root / "README.md").read_text(encoding="utf-8").split())
+    assert help_says in guide, f"the Mac guide changed its {mac} limit; update the software"
+    assert software_says in " ".join(inst.REQUIREMENTS) and software_says in readme
+
+
 def test_the_gui_installer_lists_the_requirements_before_installing(monkeypatch):
     import importlib
     from unittest import mock
