@@ -236,25 +236,28 @@ def _output_path(source: Path, output_dir: Optional[str], fmt: str,
         part += f"_{slow}x"
     stem = f"{source.stem}{part}_smooth"
 
-    def taken(path: Path) -> bool:
-        if not path.exists():
-            return False
-        return any(path.iterdir()) if path.is_dir() else True
-
     target = base / f"{stem}{suffix}"
     n = 1
-    while taken(target):
-        n += 1
-        target = base / f"{stem}_{n:02d}{suffix}"
-    return target
+    while True:
+        # Made here, so two runs at once never share a path, and a run that
+        # stops or fails only ever deletes its own render.
+        try:
+            if suffix:
+                target.open("x").close()
+            else:
+                target.mkdir()
+            return target
+        except FileExistsError:
+            n += 1
+            target = base / f"{stem}_{n:02d}{suffix}"
 
 
 def _discard(output: Path) -> None:
-    """Delete a render that will not be used. Its path was new to this run."""
-    if output.is_dir():
-        shutil.rmtree(output, ignore_errors=True)
-    else:
-        with contextlib.suppress(OSError):
+    """Delete a render that will not be used. `_output_path` made its path."""
+    with contextlib.suppress(OSError):
+        if output.is_dir():
+            shutil.rmtree(output, ignore_errors=True)
+        else:
             output.unlink(missing_ok=True)
 
 
@@ -507,12 +510,46 @@ def _run(args, summary: dict) -> int:
                           cfg.slow_motion, args.project, args.cache_dir)
     print(f"Rendering to: {output}")
     # A render that stops or fails never goes into Resolve, so its frames
-    # would only take space. A 4K sequence is about 6 MB a frame.
+    # would only take space. A 4K sequence is about 6 MB a frame. Once its
+    # import has begun it stays, since the timeline may already use it.
     try:
         result = render_plan(source, plan, output, cfg, progress=progress,
                              sequence=(args.format == "png"), frames=frames)
         # Stopped while the last frames were written: nothing goes into Resolve.
         status.check_stop()
+
+        print(f"Wrote {result.frames_written} frames at {result.fps:.3f} fps.")
+        if result.note:
+            print(result.note)
+        if result.upscaled:
+            print(f"Upscaled 2x to {result.width}x{result.height} with Real-ESRGAN.")
+        elif cfg.network_upscale:
+            print(f"Real-ESRGAN did not run, so Super Scale does the upscale. "
+                  f"{result.upscale_note}")
+        status.upscaled = result.upscaled
+        status.slow_motion = cfg.slow_motion
+        summary["render"] = result.to_dict()
+
+        # Resolve imports an image sequence from its first frame, not its folder.
+        if result.is_sequence:
+            frames = sorted(result.output.glob("*.png"))
+            status.import_path = str(frames[0]) if frames else str(result.output)
+            if frames:
+                status.sequence_pattern = str(result.output / SEQUENCE_PATTERN)
+                status.sequence_frames = len(frames)
+                status.fps = result.fps
+        else:
+            status.import_path = str(result.output)
+
+        if resolve is None:
+            # The panel has its own Resolve connection and finishes the import
+            # from there, which avoids depending on external scripting being
+            # enabled. A Stop can still come while this last status waits.
+            print(f"Rendered to: {result.output}")
+            summary["ok"] = True
+            summary["import_path"] = status.import_path
+            status.write(done=True, ok=True, message=_finished(plan, result))
+            return 0
     except SourceError as exc:
         _discard(output)
         print(f"Error: {exc}")
@@ -522,37 +559,6 @@ def _run(args, summary: dict) -> int:
     except BaseException:
         _discard(output)
         raise
-
-    print(f"Wrote {result.frames_written} frames at {result.fps:.3f} fps.")
-    if result.note:
-        print(result.note)
-    if result.upscaled:
-        print(f"Upscaled 2x to {result.width}x{result.height} with Real-ESRGAN.")
-    elif cfg.network_upscale:
-        print(f"Real-ESRGAN did not run, so Super Scale does the upscale. {result.upscale_note}")
-    status.upscaled = result.upscaled
-    status.slow_motion = cfg.slow_motion
-    summary["render"] = result.to_dict()
-
-    # Resolve imports an image sequence from its first frame, not its folder.
-    if result.is_sequence:
-        frames = sorted(result.output.glob("*.png"))
-        status.import_path = str(frames[0]) if frames else str(result.output)
-        if frames:
-            status.sequence_pattern = str(result.output / SEQUENCE_PATTERN)
-            status.sequence_frames = len(frames)
-            status.fps = result.fps
-    else:
-        status.import_path = str(result.output)
-
-    if resolve is None:
-        # The panel has its own Resolve connection and finishes the import from
-        # there, which avoids depending on external scripting being enabled.
-        print(f"Rendered to: {result.output}")
-        summary["ok"] = True
-        summary["import_path"] = status.import_path
-        status.write(done=True, ok=True, message=_finished(plan, result))
-        return 0
 
     # Too late to stop from here, or the clip would be left half placed.
     status.committed = True

@@ -139,7 +139,6 @@ def test_a_project_named_like_a_device_still_gets_a_folder(tmp_path, project, fo
     """Windows will not make a folder called NUL or COM1."""
     out = smooth._output_path(tmp_path / "clip.avi", None, "png", project=project,
                               cache=str(tmp_path / "CacheClip"))
-    out.mkdir()
     assert out.parent == tmp_path / "Upflow2x" / folder and out.is_dir()
 
 
@@ -532,25 +531,120 @@ def test_a_stop_while_the_last_frames_are_written_still_counts(make_anime, monke
     assert not list((tmp_path / "o").iterdir()), "its frames were left taking space"
 
 
+def _frames_left_when_discarded(monkeypatch):
+    """What the render held just before it was deleted, one entry a delete."""
+    left, real = [], smooth._discard
+
+    def discard(output):
+        if output.is_dir():
+            left.append(len(list(output.iterdir())))
+        else:
+            left.append(output.stat().st_size if output.exists() else 0)
+        real(output)
+
+    monkeypatch.setattr(smooth, "_discard", discard)
+    return left
+
+
 @pytest.mark.parametrize("fmt", ["png", "mkv"])
 def test_a_render_stopped_partway_leaves_no_frames(make_anime, monkeypatch, tmp_path, fmt):
     """It never goes into Resolve, and at 4K each frame left is about 6 MB."""
+    from Pipeline import render
     src = make_anime(holds=(2,) * 8)
     status = tmp_path / "status.json"
-    real = smooth.render_plan
+    written = []
 
-    def stop_halfway(*a, progress=None, **k):
-        def report(stage, fraction):
-            if stage.startswith("Interpolating") and fraction > 0.5:
-                status.with_suffix(".stop").write_text("")
-            progress(stage, fraction)
-        return real(*a, progress=report, **k)
+    def wrote():
+        written.append(1)
+        if len(written) == 3:
+            status.with_suffix(".stop").write_text("")
 
-    monkeypatch.setattr(smooth, "render_plan", stop_halfway)
+    if fmt == "png":
+        real_write = Path.write_bytes
+
+        def write_bytes(self, data):
+            result = real_write(self, data)
+            if self.suffix == ".png":
+                wrote()
+            return result
+
+        monkeypatch.setattr(Path, "write_bytes", write_bytes)
+    else:
+        real_writer = render._writer
+
+        def counting_writer(*a, **k):
+            inner = real_writer(*a, **k)
+
+            class Counting:
+                def write(self, frame):
+                    inner.write(frame)
+                    wrote()
+
+                def release(self):
+                    inner.release()
+
+            return Counting()
+
+        monkeypatch.setattr(render, "_writer", counting_writer)
+    left = _frames_left_when_discarded(monkeypatch)
     assert run(monkeypatch, ["--video", str(src), "--format", fmt, "--status-file", str(status),
                              "--output-dir", str(tmp_path / "o")]) == 1
     assert json.loads(status.read_text())["message"] == "Stopped."
+    assert len(written) >= 3 and len(left) == 1 and left[0] > 0, "nothing was written to delete"
     assert not list((tmp_path / "o").iterdir())
+
+
+def test_a_stop_while_the_final_status_waits_deletes_the_render(make_anime, monkeypatch,
+                                                                 tmp_path):
+    """The panel holds the status file while it reads it, so the last write
+    waits, and a Stop then means the render is never imported."""
+    src = make_anime(holds=(2,) * 8)
+    status = tmp_path / "status.json"
+    real_write = smooth.StatusFile.write
+
+    def write(self, *, done=False, ok=False, message=None):
+        if done and ok:
+            self.stop_path.write_text("")
+        return real_write(self, done=done, ok=ok, message=message)
+
+    monkeypatch.setattr(smooth.StatusFile, "write", write)
+    left = _frames_left_when_discarded(monkeypatch)
+    assert run(monkeypatch, ["--video", str(src), "--status-file", str(status),
+                             "--output-dir", str(tmp_path / "o")]) == 1
+    payload = json.loads(status.read_text())
+    assert payload["message"] == "Stopped." and payload["import_path"] == ""
+    assert left and left[0] == 16
+    assert not list((tmp_path / "o").iterdir())
+
+
+def test_a_delete_that_fails_still_reports_the_stop(make_anime, monkeypatch, tmp_path):
+    src = make_anime(holds=(2,) * 8)
+    status = tmp_path / "status.json"
+    _stop_after_render(monkeypatch, status)
+
+    def locked(*a, **k):
+        raise PermissionError("the folder is open in Explorer")
+
+    monkeypatch.setattr(smooth.shutil, "rmtree", locked)
+    assert run(monkeypatch, ["--video", str(src), "--status-file", str(status),
+                             "--output-dir", str(tmp_path / "o")]) == 1
+    assert json.loads(status.read_text())["message"] == "Stopped."
+
+
+def test_two_renders_of_one_clip_never_share_a_folder(tmp_path):
+    """One that failed would delete the other's finished render."""
+    first = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "png")
+    second = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "png")
+    video = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "mp4")
+    again = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "mp4")
+    assert first != second and video != again
+    assert first.is_dir() and second.is_dir() and video.is_file() and again.is_file()
+
+
+def test_an_empty_folder_already_there_is_not_taken_over(tmp_path):
+    (tmp_path / "o" / "clip_smooth").mkdir(parents=True)
+    out = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "png")
+    assert out.name == "clip_smooth_02"
 
 
 def test_a_render_that_fails_partway_leaves_no_frames(make_anime, monkeypatch, tmp_path):
