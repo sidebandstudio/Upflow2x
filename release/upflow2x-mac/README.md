@@ -290,7 +290,7 @@ afterwards.
 runs the Lua panel under an embedded Lua runtime, so buttons, commands and the
 full render pipeline are all covered headlessly. See `tests/README.md`.
 
-Tests run on Linux, macOS and Windows against Python 3.9 and 3.12.
+Tests run on Linux, macOS and Windows against Python 3.10 and 3.12.
 
 To see which scripting API methods a Resolve build offers, turn on
 Preferences → System → General → External scripting using → Local, set up
