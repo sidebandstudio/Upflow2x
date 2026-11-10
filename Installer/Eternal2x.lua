@@ -14,6 +14,11 @@ end
 
 local function trim_trailing_sep(path)
     if not path then return "" end
+    -- A drive or the disk's root keeps its separator. D: alone means the
+    -- folder that drive was last in, and / trimmed is nothing at all.
+    if path:match("^%a:[/\\]+$") or path:match("^[/\\]+$") then
+        return path:sub(1, path:match("^%a:") and 3 or 1)
+    end
     local out = path:gsub("[/\\]+$", "")
     return out
 end
@@ -1963,6 +1968,9 @@ end
 function win.On.FolderCombo.CurrentIndexChanged(ev)
     if FILLING_FOLDERS then return end
     local index = items.FolderCombo.CurrentIndex or 0
+    -- Showing the folder already in use is no choice. Resolve may deliver
+    -- the refill's own events after it, and refilling for them would loop.
+    if index == (OUTPUT_DIR ~= "" and 1 or 0) then return end
     if index == 0 then
         OUTPUT_DIR = ""
     elseif index == (OUTPUT_DIR ~= "" and 2 or 1) then

@@ -225,6 +225,34 @@ def test_a_folder_chosen_under_save_to_is_used_and_kept(lua, direct):
     assert H.widgets["FolderCombo"].CurrentIndex == 1
 
 
+@pytest.mark.parametrize("chosen,kept", [("D:\\", "D:\\"), ("D:/", "D:/"), ("/", "/"),
+                                         ("D:\\Renders\\", "D:\\Renders")])
+def test_a_drive_or_disk_root_can_be_chosen(lua, direct, chosen, kept):
+    """D: alone is the folder that drive was last in, and / trimmed is nothing."""
+    H = load(lua, ui_script(direct))
+    H.chosen_dir = chosen
+    H.set_combo("FolderCombo", 1)
+    assert conf_value(direct, "output_dir") == kept
+
+
+def test_an_event_that_changes_nothing_refills_nothing(lua, direct):
+    """Resolve may deliver the refill's own index changes after it."""
+    H = load(lua, ui_script(direct))
+    H.chosen_dir = "D:/Renders/"
+    H.set_combo("FolderCombo", 1)
+    lua.globals().H = H
+    lua.execute("""
+        local combo = H.widgets.FolderCombo
+        local clear = combo.Clear
+        H.clears = 0
+        function combo:Clear() H.clears = H.clears + 1 return clear(self) end
+    """)
+    for _ in range(5):
+        H.fire("FolderCombo", "CurrentIndexChanged")
+    assert H.clears == 0
+    assert conf_value(direct, "output_dir") == "D:/Renders"
+
+
 def test_cancelling_the_folder_dialog_changes_nothing(lua, direct):
     H = load(lua, ui_script(direct))
     H.chosen_dir = None
