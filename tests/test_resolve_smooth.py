@@ -529,6 +529,45 @@ def test_a_stop_while_the_last_frames_are_written_still_counts(make_anime, monke
     payload = json.loads(status.read_text())
     assert payload["ok"] is False and payload["message"] == "Stopped."
     assert payload["import_path"] == "", "a stopped render must not be imported"
+    assert not list((tmp_path / "o").iterdir()), "its frames were left taking space"
+
+
+@pytest.mark.parametrize("fmt", ["png", "mkv"])
+def test_a_render_stopped_partway_leaves_no_frames(make_anime, monkeypatch, tmp_path, fmt):
+    """It never goes into Resolve, and at 4K each frame left is about 6 MB."""
+    src = make_anime(holds=(2,) * 8)
+    status = tmp_path / "status.json"
+    real = smooth.render_plan
+
+    def stop_halfway(*a, progress=None, **k):
+        def report(stage, fraction):
+            if stage.startswith("Interpolating") and fraction > 0.5:
+                status.with_suffix(".stop").write_text("")
+            progress(stage, fraction)
+        return real(*a, progress=report, **k)
+
+    monkeypatch.setattr(smooth, "render_plan", stop_halfway)
+    assert run(monkeypatch, ["--video", str(src), "--format", fmt, "--status-file", str(status),
+                             "--output-dir", str(tmp_path / "o")]) == 1
+    assert json.loads(status.read_text())["message"] == "Stopped."
+    assert not list((tmp_path / "o").iterdir())
+
+
+def test_a_render_that_fails_partway_leaves_no_frames(make_anime, monkeypatch, tmp_path):
+    src = make_anime(holds=(2,) * 8)
+    real, written = Path.write_bytes, []
+
+    def fail_on_the_fifth(self, data):
+        if self.suffix == ".png":
+            written.append(self)
+            if len(written) == 5:
+                raise OSError("the disk is full")
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_on_the_fifth)
+    assert run(monkeypatch, ["--video", str(src), "--output-dir", str(tmp_path / "o")]) == 2
+    assert len(written) >= 5
+    assert not list((tmp_path / "o").iterdir())
 
 
 def _stop_after_render(monkeypatch, status):
