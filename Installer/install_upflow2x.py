@@ -10,6 +10,17 @@ DEFAULT_UPDATE_URL = (
     "sidebandstudio/Upflow2x/main/update/latest.json"
 )
 
+# What Upflow2x needs, as the download page lists it. Both installers show it
+# before installing, and the panel shows it on its (i).
+REQUIREMENTS = (
+    "DaVinci Resolve Studio 18 or newer. The free edition blocks script panels.",
+    "Windows 10 or 11, or macOS 12 or newer.",
+    "Python 3.10 to 3.14. Older Macs need an older one, see the Mac guide.",
+    "A DirectX 12 GPU on Windows draws and upscales. Without one, and on a Mac, "
+    "the in-betweens run on the CPU and Super Scale upscales.",
+    "The first render downloads about 50 MB.",
+)
+
 
 def _resolve_scripts_root() -> Path:
     """Resolve's per-user Fusion/Scripts folder, as Blackmagic documents it."""
@@ -164,6 +175,11 @@ def write_config(dest_dir: Path, repo_root: Path, python_path: str,
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
     src_lua = repo_root / "Installer" / "Eternal2xLauncher.lua"
+
+    print("Upflow2x needs:")
+    for line in REQUIREMENTS:
+        print(f"  - {line}")
+    print()
 
     if not src_lua.exists():
         print(f"Missing launcher script: {src_lua}")

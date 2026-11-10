@@ -113,6 +113,13 @@ def test_every_control_has_a_handler(lua, direct):
         assert expected in handlers, f"no handler for {expected}"
 
 
+def test_the_panel_shows_what_upflow2x_needs(lua, direct):
+    from Installer.install_upflow2x import REQUIREMENTS
+    H = load(lua, ui_script(direct))
+    tip = H.widgets["NeedsInfo"].ToolTip
+    assert tip.splitlines() == ["Upflow2x needs:"] + list(REQUIREMENTS)
+
+
 def test_there_is_no_quality_choice(lua, direct):
     """Pixel tracking doubled lines and smeared fast characters, and no check
     caught every case, so the network draws every in-between."""

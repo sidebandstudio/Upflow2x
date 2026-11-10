@@ -64,9 +64,16 @@ which is where retimers tear, melt and double lines.
 - **DaVinci Resolve Studio** 18 or newer. Since 19.1 the free edition blocks
   script panels like this one, so it cannot open Upflow2x. Without a GPU, the
   2x upscale falls back to Super Scale, which is Studio only too.
+- Windows 10 or 11, or macOS 12 or newer.
 - Python 3.10 to 3.14 on your PATH, from
   [python.org](https://www.python.org/downloads/latest/python3.14/). 3.15 is too
   new for the AI runtime, and on an Intel Mac it stops at 3.13.
+- A DirectX 12 GPU on Windows draws the in-betweens and the 2x upscale. Without
+  one, and on a Mac, the in-betweens run on the CPU and Super Scale upscales.
+- The first render downloads about 50 MB.
+
+The installer window lists these before it installs anything, and the (i)
+at the top of the panel shows them again.
 
 ## Install
 
