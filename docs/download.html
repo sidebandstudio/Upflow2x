@@ -43,7 +43,7 @@
     <section class="page-head">
         <div class="wrap">
             <h1>Download</h1>
-            <p class="lede">Each zip holds the panel, the Python pipeline, the upscaler and the installer. The in-between model isn't in it. The first render downloads it, about 50 MB, and checks it against its SHA-256.</p>
+            <p class="lede">Open setup and click Install. It installs Upflow2x and its own Python automatically. Keep your internet connection on while setup runs. The first render downloads the in-between model, about 50 MB.</p>
         </div>
     </section>
 
@@ -57,10 +57,10 @@
                     </div>
                     <span class="tag pending" data-version>Latest</span>
                 </div>
-                <a class="btn btn-amber" data-asset="upflow2x-win.zip"
+                <a class="btn btn-amber" data-asset="Upflow2xInstaller.exe"
                    href="https://github.com/sidebandstudio/Upflow2x/releases/latest">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-                    upflow2x-win.zip
+                    Upflow2xInstaller.exe
                 </a>
                 <p class="size">Draws the in-betweens and the 2x upscale on the GPU through DirectML where the card supports it. Without one, the in-betweens run on the CPU and Super Scale upscales.</p>
             </article>
@@ -72,14 +72,16 @@
                     </div>
                     <span class="tag pending" data-version>Latest</span>
                 </div>
-                <a class="btn btn-amber" data-asset="upflow2x-mac.zip"
+                <a class="btn btn-amber" data-asset="Upflow2xInstaller-mac.zip"
                    href="https://github.com/sidebandstudio/Upflow2x/releases/latest">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-                    upflow2x-mac.zip
+                    Upflow2xInstaller-mac.zip
                 </a>
-                <p class="size">In-betweens on the CPU, upscale with Super Scale. Python 3.14 needs macOS 14 and Apple Silicon. The <a href="help.html#macos">Mac guide</a> lists the rest.</p>
+                <p class="size">Extract the zip and open Upflow2xInstaller.app. The same app works on Apple Silicon and Intel. In-betweens run on the CPU, and Super Scale upscales.</p>
             </article>
         </div>
+
+        <p class="note">Standalone setup starts with v0.5.1. For v0.5.0 and earlier, use the <a href="help.html#manual">manual install guide</a>.</p>
 
         <p class="note">Upflow2x is free. If it works for you, a <a href="https://github.com/sidebandstudio/Upflow2x">star on GitHub</a> helps other editors find it.</p>
 
@@ -90,16 +92,16 @@
         <section class="section" aria-labelledby="install-title">
             <div class="section-head">
                 <h2 id="install-title">Install in three steps</h2>
-                <p>You need DaVinci Resolve Studio 18 or newer and Python 3.10 to 3.14. Python 3.15 is too new for the AI runtime. The <a href="help.html#windows">help page</a> walks through every click.</p>
+                <p>You need DaVinci Resolve Studio 18 or newer. Setup handles Python. The <a href="help.html#windows">help page</a> walks through every click.</p>
             </div>
             <ol class="three">
                 <li>
-                    <h3>Extract</h3>
-                    <p>Unzip it somewhere permanent, not your Downloads folder. The panel remembers where it lives, so moving it later means running the installer again.</p>
+                    <h3>Open setup</h3>
+                    <p>Open the Windows installer, or extract the Mac zip and open the app inside.</p>
                 </li>
                 <li>
                     <h3>Install</h3>
-                    <p>From the folder that contains <code>Installer</code>, run <code>python Installer/gui_installer.py</code>, or <code>python3</code> on macOS, and click Install.</p>
+                    <p>Click Install. Setup puts the plugin and its private Python in your application data folder. You can delete the download afterwards.</p>
                 </li>
                 <li>
                     <h3>Open</h3>
@@ -140,7 +142,7 @@
 
 <script>
 // The buttons work without this: they open the newest release on GitHub.
-// With the release list, they download its zip and say which version.
+// With the release list, they download setup and say which version.
 var REPO = 'sidebandstudio/Upflow2x';
 
 function assetUrl(release, name) {
