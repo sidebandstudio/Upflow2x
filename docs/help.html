@@ -69,7 +69,7 @@
                 <ol class="os-steps">
                     <li>
                         <h3>Open the Windows installer</h3>
-                        <p>Get <code>Upflow2xInstaller.exe</code> from the <a href="download.html">download page</a>, then double-click it.</p>
+                        <p>Get <code>Upflow2xInstaller.exe</code> from the <a href="download.html">download page</a>, then double-click it. If Windows says it protected your PC, click More info, then Run anyway. Setup isn't signed yet, so Windows doesn't recognise it.</p>
                     </li>
                     <li>
                         <h3>Click Install</h3>
@@ -95,6 +95,7 @@
                     <li>
                         <h3>Open setup and click Install</h3>
                         <p>Double-click the zip, open <code>Upflow2xInstaller.app</code>, then click Install. Keep your internet connection on while it runs. The same app works on Apple Silicon and Intel. Setup installs its own Python and stores Upflow2x in <code>~/Library/Application Support/Upflow2x</code>.</p>
+                        <p>If macOS says it can't check the app for malware, click Done, open System Settings, Privacy &amp; Security, scroll down and click Open Anyway, then confirm. On macOS 12 it's System Preferences, Security &amp; Privacy. Apple hasn't checked setup yet, so macOS asks this once.</p>
                     </li>
                     <li>
                         <h3>Open it in Resolve</h3>
@@ -136,7 +137,7 @@
                     </li>
                     <li>
                         <h3>Render</h3>
-                        <p>Press <strong>Render</strong>. It keeps every marked frame as drawn and draws every frame between two markers fresh, so a part you leave unmarked never counts. With Interpolate on, the render ends on the last marker, so mark the last drawing you want in it. A clip with no markers at all is rendered from the drawings Upflow2x finds on its own. The render runs in the background with a progress bar and the time left, and Resolve stays usable. <strong>Stop</strong> ends it early. The first time, it installs the AI runtime and downloads the model, about 50 MB, so the bar can sit at 0% for a minute or two.</p>
+                        <p>Press <strong>Render</strong>. It keeps every marked frame as drawn and draws every frame between two markers fresh, so a part you leave unmarked never counts. With Interpolate on, the render ends on the last marker, so mark the last drawing you want in it. A clip with no markers at all is rendered from the drawings Upflow2x finds on its own. The render runs in the background with a progress bar and the time left, and Resolve stays usable. <strong>Stop</strong> ends it early. The first time, it installs the AI runtime and downloads the model, about 50 MB in all, so the bar can sit at 0% for a minute or two.</p>
                         <p>When it's done, the result is imported, at 2x if Upscaling is on, and placed above the original, starting on the same frame, at the same frame rate with three frames for every one of the clip's, up to the last marker if it has any, so it plays at a third of the speed, ready to time remap. With Interpolate off it keeps the clip's length. It goes on the lowest track that is empty there, or a new track named Upflow2x, so none of your clips get covered. Only the part of the file you trimmed to is rebuilt.</p>
                         <p>If another timeline is open when it finishes, or the original was deleted or retrimmed, it goes at the end of the timeline instead. An image sequence whose frame rate Resolve won't set stays in the media pool, since it would play at the wrong speed.</p>
                     </li>

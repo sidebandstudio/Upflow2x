@@ -80,6 +80,9 @@ at the top of the panel shows them again.
 
 1. Download `Upflow2xInstaller.exe` on Windows, or extract
    `Upflow2xInstaller-mac.zip` and open `Upflow2xInstaller.app` on a Mac.
+   Setup isn't signed yet. If Windows says it protected your PC, click
+   **More info**, then **Run anyway**. If macOS says it can't check the app,
+   open System Settings → Privacy & Security and click **Open Anyway**.
 2. Click **Install** and wait for setup to finish. No separate Python download
    or terminal commands are needed.
 3. Setup stores the plugin and its private Python in `%LOCALAPPDATA%\Upflow2x`
@@ -198,7 +201,7 @@ pointer on one to see what it does.
 | **Threshold** | How big a change Analyse counts as a new drawing, 1 to 9. Lower catches small moves, like only a mouth or a slow drift. Higher counts only big ones, like the whole shot moving. It does nothing to frames you have marked. |
 | **Output** | `Image sequence` is lossless and the most reliable to import. `MP4` is a single compact file but lossy. `MKV` is a lossless single file. All three are 8-bit RGB: transparency and 10-bit colour in the source are not kept. MP4 and MKV need an even width and height. |
 | **Upscaling** | Upscales each drawing 2x with Real-ESRGAN's anime video model, on the GPU through DirectML. The in-betweens are then drawn at 2x from the upscaled drawings, so the model runs once a drawing rather than once a frame. The model ships with Upflow2x. Without a GPU, on a Mac for one, Resolve's Super Scale is applied to the imported clip instead. Either way it only shows on a timeline bigger than the clip, such as 3840x2160 for 1080p footage. A 2x render has four times the pixels. As an image sequence, a 4K frame of anime is about 6 MB, four to five times its 1080p size. |
-| **Interpolate** | On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, and falls back to the CPU, about ten times slower. If its Python already has ONNX Runtime without DirectML, that one is used, on the CPU. Its first run installs ONNX Runtime and downloads the model, about 50 MB, so it needs a connection once; without one, every drawing is kept as drawn and the panel says why. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off skips the in-betweens, so every drawing comes back on its original frame and the render keeps the clip's length. With Upscaling on, that only upscales. |
+| **Interpolate** | On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, and falls back to the CPU, about ten times slower. If its Python already has ONNX Runtime without DirectML, that one is used, on the CPU. Its first run installs ONNX Runtime and downloads the model, about 50 MB in all, so it needs a connection once; without one, every drawing is kept as drawn and the panel says why. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off skips the in-betweens, so every drawing comes back on its original frame and the render keeps the clip's length. With Upscaling on, that only upscales. |
 
 Settings are remembered between sessions.
 
