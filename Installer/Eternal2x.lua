@@ -52,7 +52,10 @@ end
 local function shell_quote(s)
     if not s then return "" end
     if is_windows() then
-        return '"' .. s:gsub('"', '""') .. '"'
+        -- A backslash before the closing quote escapes it, so a folder like
+        -- D:\Cache\ ran on into the next argument. Doubled, it stays one.
+        local body = s:gsub('"', '""'):gsub("(\\+)$", "%1%1")
+        return '"' .. body .. '"'
     end
     -- Single quotes, so $, backticks and backslashes in a path stay literal.
     -- Inside double quotes the shell would expand `$HOME` in a file name, or
@@ -1207,6 +1210,20 @@ local function mark_drawings(clip, marks)
     return placed, shared
 end
 
+-- The open project's name and Resolve's cache folder, which decide where the
+-- stage puts a render. Either can be missing, and the stage then falls back.
+local function render_folder_hints()
+    local name, cache = "", ""
+    pcall(function()
+        local project = get_resolve():GetProjectManager():GetCurrentProject()
+        local got = project:GetName()
+        if type(got) == "string" then name = got end
+        got = project:GetSetting("perfCacheClipsLocation")
+        if type(got) == "string" then cache = got end
+    end)
+    return name, cache
+end
+
 local function current_args(extra)
     local args = ""
     if SOURCE_PATH and SOURCE_PATH ~= "" then
@@ -1237,7 +1254,15 @@ local function current_args(extra)
         -- Each step doubles or halves how big a change counts, around the default.
         args = args .. " --threshold " .. string.format("%.6f", 0.004 * 2 ^ ((THRESHOLD - 5) / 2)):gsub(",", ".")
     end
-    if OUTPUT_DIR ~= "" then args = args .. " --output-dir " .. shell_quote(OUTPUT_DIR) end
+    if OUTPUT_DIR ~= "" then
+        args = args .. " --output-dir " .. shell_quote(OUTPUT_DIR)
+    else
+        -- Renders go in one Upflow2x folder beside Resolve's cache, a folder
+        -- per project, rather than among the clips they came from.
+        local project, cache = render_folder_hints()
+        if project ~= "" then args = args .. " --project " .. shell_quote(project) end
+        if cache ~= "" then args = args .. " --cache-dir " .. shell_quote(cache) end
+    end
     args = args .. " --status-file " .. shell_quote(STATUS_PATH)
     return args .. (extra or "")
 end

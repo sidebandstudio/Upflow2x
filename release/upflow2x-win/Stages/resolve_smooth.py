@@ -170,10 +170,46 @@ def _finished(plan, result) -> str:
     return message
 
 
+_DEVICES = {"CON", "PRN", "AUX", "NUL"} | {f"{port}{n}" for port in ("COM", "LPT")
+                                           for n in range(1, 10)}
+
+
+def default_output_dir(project: Optional[str] = None, cache: Optional[str] = None) -> Path:
+    """Where renders go unless the panel is told otherwise: an Upflow2x folder
+    beside Resolve's cache folder, with a folder for each project.
+
+    Beside each clip, a render landed in whatever folder the clip came from,
+    among the recordings. Resolve keeps its own working files in its cache
+    folder. Where that is not set, renders go in the Videos folder, or Movies
+    on a Mac.
+    """
+    if cache and Path(cache).is_absolute():
+        root = Path(cache).parent
+    else:
+        root = Path.home() / ("Movies" if sys.platform == "darwin" else "Videos")
+    # A project name can hold anything. A folder name on Windows cannot, nor
+    # can it be a device's, like NUL or COM1, even with an extension.
+    name = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in project or "")
+    name = name.strip(" .")
+    if name.split(".")[0].strip().upper() in _DEVICES:
+        name = "_" + name
+    return root / "Upflow2x" / name if name else root / "Upflow2x"
+
+
 def _output_path(source: Path, output_dir: Optional[str], fmt: str,
-                 frames: Optional[tuple] = None, slow: int = 1) -> Path:
-    base = Path(output_dir) if output_dir else source.parent / "Upflow2x"
-    base.mkdir(parents=True, exist_ok=True)
+                 frames: Optional[tuple] = None, slow: int = 1,
+                 project: Optional[str] = None, cache: Optional[str] = None) -> Path:
+    if output_dir:
+        base = Path(output_dir)
+        base.mkdir(parents=True, exist_ok=True)
+    else:
+        base = default_output_dir(project, cache)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # The cache can be on a drive that is not plugged in.
+            base = default_output_dir(project)
+            base.mkdir(parents=True, exist_ok=True)
     suffix = FORMATS.get(fmt, "")
     # Name a trimmed render after its range, so two cuts of one file differ,
     # and a slowed one after how much slower.
@@ -230,7 +266,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Seconds into the file where the clip ends.")
     parser.add_argument("--output-dir", default=None,
                         help="Where to write the result (default: an Upflow2x "
-                             "folder beside the source).")
+                             "folder beside Resolve's cache folder, or in Videos).")
+    parser.add_argument("--project", default=None,
+                        help="The Resolve project's name. Without --output-dir, its "
+                             "renders get a folder of their own.")
+    parser.add_argument("--cache-dir", default=None,
+                        help="Resolve's cache folder. Without --output-dir, renders go "
+                             "in an Upflow2x folder beside it.")
     parser.add_argument("--format", default="png", choices=sorted(FORMATS),
                         help="png: lossless image sequence (default). "
                              "mp4: compact H.264 file. "
@@ -434,7 +476,7 @@ def _run(args, summary: dict) -> int:
         return 0
 
     output = _output_path(source, args.output_dir, args.format, None if whole else frames,
-                          cfg.slow_motion)
+                          cfg.slow_motion, args.project, args.cache_dir)
     print(f"Rendering to: {output}")
     try:
         result = render_plan(source, plan, output, cfg, progress=progress,

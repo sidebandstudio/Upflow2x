@@ -388,6 +388,11 @@ function H.make_resolve(clip_file_path)
     local project = {
         GetCurrentTimeline = function(_self) return timeline end,
         GetMediaPool = function(_self) return pool end,
+        GetName = function(_self) return H.project_name or "Untitled Project" end,
+        GetSetting = function(_self, key)
+            if key == "perfCacheClipsLocation" then return H.cache_location end
+            return nil
+        end,
     }
     local pm = { GetCurrentProject = function(_self) return project end }
     return { GetProjectManager = function(_self) return pm end }

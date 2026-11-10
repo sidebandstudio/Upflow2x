@@ -24,6 +24,8 @@ from Installer.install_upflow2x import write_config  # noqa: E402
 from tests import fake_rife  # noqa: E402
 
 HARNESS = Path(__file__).resolve().parent / "lua_harness.lua"
+# A name a Windows folder cannot take as it is, and the folder it gets.
+PROJECT, PROJECT_FOLDER = "Episode 1: Final?", "Episode 1_ Final_"
 
 
 @pytest.fixture
@@ -50,8 +52,8 @@ def install(tmp_path, repo_root, make_anime, folder):
     write_config(comp, plugin, sys.executable)
 
     def _open(holds=(2,) * 12, clip_name="scene 01.avi"):
-        # Keep the media well away from the plugin folder: the default output
-        # directory is an Eternal2x folder beside the source.
+        # Keep the media well away from the plugin folder. Renders go in an
+        # Upflow2x folder beside Resolve's cache, here in the media folder.
         media = tmp_path / "media"
         media.mkdir(exist_ok=True)
         src = media / clip_name
@@ -63,6 +65,8 @@ def install(tmp_path, repo_root, make_anime, folder):
         # Lua accepts forward slashes on Windows.
         H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
         H.real_execute = True
+        H.project_name = PROJECT
+        H.cache_location = str(media / "CacheClip")
         H.load(str(comp / "Upflow2x.lua"), str(src))
         H.plugin_root = str(plugin)
         return H, src
@@ -105,7 +109,7 @@ def finish(H, timeout: float = FINISH_TIMEOUT):
 
 
 def outputs(src: Path):
-    folder = src.parent / "Upflow2x"
+    folder = src.parent / "Upflow2x" / PROJECT_FOLDER
     return sorted(folder.iterdir()) if folder.exists() else []
 
 

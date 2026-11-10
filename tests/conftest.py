@@ -43,6 +43,15 @@ def _no_gpu_for_the_upscaler(request, monkeypatch):
     monkeypatch.setattr(upscaler, "Upscaler", no_gpu)
 
 
+@pytest.fixture(autouse=True)
+def _a_home_of_its_own(tmp_path, monkeypatch):
+    """A render told nowhere to go lands in the Videos folder. A test's lands
+    in its own, and so does one from a stage run in another Python."""
+    home = tmp_path / "user-home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 @pytest.fixture
 def repo_root() -> Path:
     return REPO_ROOT
