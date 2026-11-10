@@ -162,6 +162,26 @@ def test_the_stage_hears_the_project_and_resolves_cache_folder(lua, direct):
     assert "--output-dir" not in cmd
 
 
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows argument quoting")
+def test_a_folder_ending_in_a_backslash_keeps_the_next_argument(lua, direct):
+    """Quoted as it was, D:\\CacheClip\\ escaped its own closing quote, and
+    the status file went into the cache folder's name."""
+    import json
+    import subprocess
+
+    from Stages.resolve_smooth import build_parser
+    H = load(lua, ui_script(direct))
+    H.cache_location = "D:\\CacheClip\\"
+    H.click("SmoothBtn")
+    line = next(x for x in H.last_command().splitlines() if "-m Stages.resolve_smooth" in x)
+    line = line.split(" > ")[0].replace(
+        "-m Stages.resolve_smooth", '-c "import json, sys; print(json.dumps(sys.argv[1:]))"')
+    got = subprocess.run(line, capture_output=True, text=True, check=True)
+    args = build_parser().parse_args(json.loads(got.stdout))
+    assert args.cache_dir == "D:\\CacheClip\\"
+    assert args.status_file.endswith(".eternal2x_status.json")
+
+
 def test_an_output_folder_in_the_settings_wins(lua, direct):
     conf = direct / "Installer" / "Eternal2x.conf"
     conf.write_text(conf.read_text() + "output_dir=/renders\n")
