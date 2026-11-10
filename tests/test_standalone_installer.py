@@ -92,12 +92,17 @@ def test_reinstall_reuses_private_python_and_preserves_settings(setup, monkeypat
 
 @pytest.mark.parametrize("platform", ["win32", "darwin"])
 def test_install_location_is_per_user_and_independent_of_the_download(tmp_path, monkeypatch, platform):
+    """In DaVinci Resolve's own folder, beside Fusion and outside its Scripts
+    folder, where Resolve would list every file as a script."""
     monkeypatch.setattr(sys, "platform", platform)
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    expected = (tmp_path / "local" if platform == "win32" else
-                tmp_path / "Library" / "Application Support") / "Upflow2x"
+    expected = (tmp_path / "roaming" / "Blackmagic Design" / "DaVinci Resolve" / "Support"
+                if platform == "win32" else
+                tmp_path / "Library" / "Application Support" / "Blackmagic Design"
+                / "DaVinci Resolve") / "Upflow2x"
     assert gui._install_dir() == expected
+    assert "Scripts" not in expected.parts
 
 
 def test_an_incomplete_private_python_is_not_reused(tmp_path, monkeypatch):

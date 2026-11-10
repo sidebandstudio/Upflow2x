@@ -73,7 +73,7 @@
                     </li>
                     <li>
                         <h3>Click Install</h3>
-                        <p>Keep your internet connection on and wait for setup to finish. It installs its own Python and puts Upflow2x in <code>%LOCALAPPDATA%\Upflow2x</code>. You do not need to install Python yourself or use a terminal. The downloaded installer can be deleted afterwards.</p>
+                        <p>Keep your internet connection on and wait for setup to finish. It installs its own Python and puts Upflow2x in DaVinci Resolve's own folder, <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code>. You do not need to install Python yourself or use a terminal. The downloaded installer can be deleted afterwards.</p>
                     </li>
                     <li>
                         <h3>Open it in Resolve</h3>
@@ -94,7 +94,7 @@
                     </li>
                     <li>
                         <h3>Open setup and click Install</h3>
-                        <p>Double-click the zip, open <code>Upflow2xInstaller.app</code>, then click Install. Keep your internet connection on while it runs. The same app works on Apple Silicon and Intel. Setup installs its own Python and stores Upflow2x in <code>~/Library/Application Support/Upflow2x</code>.</p>
+                        <p>Double-click the zip, open <code>Upflow2xInstaller.app</code>, then click Install. Keep your internet connection on while it runs. The same app works on Apple Silicon and Intel. Setup installs its own Python and stores Upflow2x in DaVinci Resolve's own folder, <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code>.</p>
                         <p>If macOS says it can't check the app for malware, click Done, open System Settings, Privacy &amp; Security, scroll down and click Open Anyway, then confirm. On macOS 12 it's System Preferences, Security &amp; Privacy. Apple hasn't checked setup yet, so macOS asks this once.</p>
                     </li>
                     <li>
@@ -167,7 +167,7 @@
                 <p>On a clip with no markers, where two drawings look like different shots, Upflow2x snaps instead of blending, which would show both shots at once. A cut right beside another cut or very fast motion can still blend for a frame, so check montages. On a marked clip it checks nothing and draws every gap between two markers, so mark the last frame before a cut as well.</p>
                 <h3 id="folder">Where renders go</h3>
                 <p>Renders go in an <code>Upflow2x</code> folder beside your project's cache folder, with a folder for each project. The cache folder is the Cache files location in Project Settings, Master Settings, Working Folders. With the cache in <code>D:\Resolve\CacheClip</code>, a project called Episode 1 renders to <code>D:\Resolve\Upflow2x\Episode 1</code>.</p>
-                <p>If the project has no cache folder, its drive is unplugged or read only, or it is in OneDrive, renders go in Resolve's own folder instead, again a folder for each project: <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code> on Windows, or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code> on a Mac. <strong>Show in Folder</strong> opens it. Up to v0.5.0 each render was saved beside its clip, and those stay where they are.</p>
+                <p>If the project has no cache folder, its drive is unplugged or read only, or it is in OneDrive, renders go in Resolve's own folder instead, again a folder for each project: <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x\Renders</code> on Windows, or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x/Renders</code> on a Mac. <strong>Show in Folder</strong> opens it. Up to v0.5.0 each render was saved beside its clip, and those stay where they are.</p>
                 <p>A render you stop, or one that fails, is deleted, since it never goes into Resolve. A finished one is never deleted, because your timeline uses it.</p>
                 <p>To keep renders somewhere else, like a drive with more space, open <strong>Save to</strong> under Output and pick <strong>Choose a folder...</strong>. Renders then go there, still a folder for each project, until you pick <strong>Resolve's folder</strong> again. If that folder can't be written to, for example because its drive is unplugged, the render stops and says so.</p>
                 <p>A 4K image sequence takes about 6 MB a frame, so a few seconds of footage can fill a gigabyte. Upflow2x never deletes a finished render. Delete a project's folder once its renders are off your timelines.</p>
@@ -230,7 +230,7 @@
                         <summary>Progress seems stuck</summary>
                         <div class="answer">
                             <p>Press Refresh Progress. If the panel says Python hasn't started, or that there's been no progress for a few minutes, the run stopped. Press Reset and run it again.</p>
-                            <p>For anything else, email us the panel's status text and the <code>.upflow2x_last_run.log</code> file from the plugin folder, <code>%LOCALAPPDATA%\Upflow2x</code> on Windows or <code>~/Library/Application Support/Upflow2x</code> on a Mac.</p>
+                            <p>For anything else, email us the panel's status text and the <code>.upflow2x_last_run.log</code> file from the plugin folder, <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code> on Windows or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code> on a Mac.</p>
                         </div>
                     </details>
                     <details>
