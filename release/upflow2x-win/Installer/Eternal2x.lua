@@ -52,7 +52,10 @@ end
 local function shell_quote(s)
     if not s then return "" end
     if is_windows() then
-        return '"' .. s:gsub('"', '""') .. '"'
+        -- A backslash before the closing quote escapes it, so a folder like
+        -- D:\Cache\ ran on into the next argument. Doubled, it stays one.
+        local body = s:gsub('"', '""'):gsub("(\\+)$", "%1%1")
+        return '"' .. body .. '"'
     end
     -- Single quotes, so $, backticks and backslashes in a path stay literal.
     -- Inside double quotes the shell would expand `$HOME` in a file name, or

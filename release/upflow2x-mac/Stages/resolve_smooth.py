@@ -170,6 +170,10 @@ def _finished(plan, result) -> str:
     return message
 
 
+_DEVICES = {"CON", "PRN", "AUX", "NUL"} | {f"{port}{n}" for port in ("COM", "LPT")
+                                           for n in range(1, 10)}
+
+
 def default_output_dir(project: Optional[str] = None, cache: Optional[str] = None) -> Path:
     """Where renders go unless the panel is told otherwise: an Upflow2x folder
     beside Resolve's cache folder, with a folder for each project.
@@ -183,9 +187,12 @@ def default_output_dir(project: Optional[str] = None, cache: Optional[str] = Non
         root = Path(cache).parent
     else:
         root = Path.home() / ("Movies" if sys.platform == "darwin" else "Videos")
-    # A project name can hold anything. A folder name on Windows cannot.
+    # A project name can hold anything. A folder name on Windows cannot, nor
+    # can it be a device's, like NUL or COM1, even with an extension.
     name = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in project or "")
     name = name.strip(" .")
+    if name.split(".")[0].strip().upper() in _DEVICES:
+        name = "_" + name
     return root / "Upflow2x" / name if name else root / "Upflow2x"
 
 
