@@ -375,6 +375,10 @@ BATCH = 8
 # with three the GPU sat idle most of a render. Half the cores, so Resolve
 # keeps the rest.
 WORKERS = max(1, min(8, (os.cpu_count() or 2) // 2))
+# OpenCV's threads for each of them. Eight workers each spreading every
+# remap over all 32 threads of a 5950X slowed the thread feeding the GPU: a
+# render took 34.6 s that took 31.6 s with two each.
+CV_THREADS = max(1, (os.cpu_count() or 2) // (2 * WORKERS))
 
 
 def _ready(frame) -> np.ndarray:
@@ -476,6 +480,8 @@ def render_plan(
         buckets[i].append(p - i)
 
     cap = _open(source, frames, progress)
+    threads = cv2.getNumThreads()
+    cv2.setNumThreads(CV_THREADS)
     pool = ThreadPoolExecutor(max_workers=WORKERS)
     # Frames still being drawn or written, oldest first. A few at most, so a
     # fast GPU can't fill memory with 4K frames waiting for the disk.
@@ -664,6 +670,7 @@ def render_plan(
         # Even on the way out of an error, no write is left going, and no
         # frame is drawn that will not be written.
         pool.shutdown(wait=True, cancel_futures=True)
+        cv2.setNumThreads(threads)
         cap.release()
         if state["writer"] is not None:
             state["writer"].release()
