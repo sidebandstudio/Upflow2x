@@ -193,8 +193,8 @@ folder can't be written to, for example because its drive is unplugged, the
 render stops and says so.
 
 A 4K image sequence takes about 6 MB a frame, so a few seconds of footage can
-fill a gigabyte. Upflow2x never deletes a render, so delete a project's
-folder once its renders are off your timelines.
+fill a gigabyte. Upflow2x never deletes a finished render, so delete a
+project's folder once its renders are off your timelines.
 
 Only the part of the file the timeline clip uses is analysed and rebuilt. To
 reach it, the file is still decoded from its start, once for Analyse and again
