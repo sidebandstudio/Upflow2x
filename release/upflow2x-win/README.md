@@ -85,8 +85,9 @@ at the top of the panel shows them again.
    open System Settings → Privacy & Security and click **Open Anyway**.
 2. Click **Install** and wait for setup to finish. No separate Python download
    or terminal commands are needed.
-3. Setup stores the plugin and its private Python in `%LOCALAPPDATA%\Upflow2x`
-   on Windows, or `~/Library/Application Support/Upflow2x` on a Mac. The
+3. Setup stores the plugin and its private Python in DaVinci Resolve's own
+   folder, `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or
+   `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. The
    downloaded installer can be deleted afterwards.
 4. Restart Resolve and open **Workspace → Scripts → Upflow2x**.
 
@@ -179,9 +180,9 @@ Project Settings → Master Settings → Working Folders. With the cache in
 `D:\Resolve\Upflow2x\Episode 1`. If the project has no cache folder, its
 drive is unplugged or read only, or it is in OneDrive, renders go in
 Resolve's own folder instead, again a folder for each project:
-`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows, or
-`~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on
-a Mac. Show in Folder opens it. Up to v0.5.0 each render was saved beside its
+`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x\Renders` on Windows,
+or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x/Renders`
+on a Mac. Show in Folder opens it. Up to v0.5.0 each render was saved beside its
 clip, and those stay where they are. A render you stop, or one that fails, is
 deleted, since it never goes into Resolve. A finished one is never deleted,
 because your timeline uses it.
@@ -244,9 +245,9 @@ python -m Stages.resolve_smooth --video grainy.mov --grain
 it, the result goes in an `Upflow2x` folder beside `--cache-dir`, Resolve's cache
 folder, in a folder named by `--project`. With no cache folder, or one in
 OneDrive, it goes in Resolve's own folder instead,
-`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or
-`~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a
-Mac. The panel passes the project and cache folder itself. Add `--network-upscale` and, where
+`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x\Renders` on Windows or
+`~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x/Renders` on
+a Mac. The panel passes the project and cache folder itself. Add `--network-upscale` and, where
 Real-ESRGAN runs on a GPU, the render is 2x. Without it, or without a GPU, the
 2x upscale is Resolve's Super Scale, applied when the panel imports the result,
 so a `--video` run stays at source resolution.
@@ -277,7 +278,7 @@ afterwards.
 | Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel says so and shows its last error. If a run was interrupted, press **Reset**. |
 | Resolve would not import the render | The render still finished. The panel prints where it is, so drag it into your media pool. Switching Output to `Image sequence` usually avoids this. |
 | Upscale skipped | Without a GPU the upscale is Super Scale, which needs Resolve Studio. |
-| Something else | Email the panel's status text and the `.upflow2x_last_run.log` file from the plugin folder, `%LOCALAPPDATA%\Upflow2x` on Windows or `~/Library/Application Support/Upflow2x` on a Mac. |
+| Something else | Email the panel's status text and the `.upflow2x_last_run.log` file from the plugin folder, `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. |
 
 ## Development
 

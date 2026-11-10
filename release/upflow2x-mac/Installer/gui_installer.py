@@ -29,11 +29,13 @@ from tkinter import ttk
 # root is not on the path, so fall back to importing the sibling module.
 try:
     from Installer.install_upflow2x import (
-        REQUIREMENTS, _resolve_scripts_dir, remove_old_install, write_config)
+        REQUIREMENTS, _resolve_scripts_dir, _resolve_scripts_root, remove_old_install,
+        write_config)
 except ImportError:  # pragma: no cover - depends on how this was launched
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from install_upflow2x import (
-        REQUIREMENTS, _resolve_scripts_dir, remove_old_install, write_config)
+        REQUIREMENTS, _resolve_scripts_dir, _resolve_scripts_root, remove_old_install,
+        write_config)
 
 # ---------------------------------------------------------------------------
 # Python download sources
@@ -93,11 +95,10 @@ def _find_repo_root() -> Path:
 
 
 def _install_dir() -> Path:
-    if sys.platform.startswith("win"):
-        return Path(os.environ["LOCALAPPDATA"]) / "Upflow2x"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Upflow2x"
-    return Path.home() / ".local" / "share" / "Upflow2x"
+    """DaVinci Resolve's own folder for this user, beside Fusion and not in
+    its Scripts folder, which Resolve would list every file of as a script."""
+    # Support/Fusion/Scripts on Windows, Fusion/Scripts on a Mac.
+    return _resolve_scripts_root().parent.parent / "Upflow2x"
 
 
 def _copy_plugin(source: Path, destination: Path) -> None:

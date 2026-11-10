@@ -199,11 +199,13 @@ def default_output_dir(project: Optional[str] = None, cache: Optional[str] = Non
     Resolve's own folder, the one its scripts are installed in.
     """
     if cache and Path(cache).is_absolute() and not _in_onedrive(Path(cache).parent):
-        root = Path(cache).parent
+        base = Path(cache).parent / "Upflow2x"
     else:
-        # Support/Fusion/Scripts on Windows, Fusion/Scripts on a Mac.
-        root = _resolve_scripts_root().parent.parent
-    return _per_project(root / "Upflow2x", project)
+        # Support/Fusion/Scripts on Windows, Fusion/Scripts on a Mac. Setup
+        # puts the plugin in its Upflow2x folder, so renders get one of their
+        # own there, and a project called Pipeline can't land among its code.
+        base = _resolve_scripts_root().parent.parent / "Upflow2x" / "Renders"
+    return _per_project(base, project)
 
 
 def _per_project(base: Path, project: Optional[str]) -> Path:
