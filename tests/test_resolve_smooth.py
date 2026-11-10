@@ -94,6 +94,37 @@ def test_the_rendered_file_lands_where_it_says(anime_in_resolve, monkeypatch, ca
     assert rendered[0].name in capsys.readouterr().out
 
 
+def test_renders_go_beside_resolves_cache_in_a_folder_per_project(tmp_path):
+    """Beside each clip, a render landed among the recordings it came from."""
+    cache = tmp_path / "work" / "CacheClip"
+    assert smooth.default_output_dir("Show", str(cache)) == tmp_path / "work" / "Upflow2x" / "Show"
+
+
+@pytest.mark.parametrize("cache", [None, "", "CacheClip"])
+def test_without_a_cache_folder_renders_go_in_videos(monkeypatch, tmp_path, cache):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    videos = "Movies" if sys.platform == "darwin" else "Videos"
+    assert smooth.default_output_dir("Show", cache) == tmp_path / videos / "Upflow2x" / "Show"
+    assert smooth.default_output_dir(None, cache) == tmp_path / videos / "Upflow2x"
+
+
+def test_a_project_name_becomes_a_folder_windows_can_make(tmp_path):
+    got = smooth.default_output_dir('a<b>:c"d/e\\f|g?h*. ', str(tmp_path / "CacheClip"))
+    assert got == tmp_path / "Upflow2x" / "a_b__c_d_e_f_g_h_"
+
+
+def test_a_cache_on_a_missing_drive_leaves_renders_in_videos(make_anime, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    blocker = tmp_path / "drive"
+    blocker.write_text("a file where the cache's drive would be")
+    out = smooth._output_path(tmp_path / "clip.avi", None, "png", project="Show",
+                              cache=str(blocker / "CacheClip"))
+    videos = "Movies" if sys.platform == "darwin" else "Videos"
+    assert out.parent == tmp_path / "home" / videos / "Upflow2x" / "Show"
+
+
 def test_the_default_output_is_a_lossless_sequence(anime_in_resolve, monkeypatch,
                                                    tmp_path):
     """Quality is the point of the tool, so the default must not be lossy."""

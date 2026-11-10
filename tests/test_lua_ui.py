@@ -149,6 +149,29 @@ def test_output_format_selection_reaches_the_command(lua, direct):
     assert "--format mp4" in H.last_command()
 
 
+def test_the_stage_hears_the_project_and_resolves_cache_folder(lua, direct):
+    """Renders landed beside each clip, among the recordings. They go beside
+    Resolve's cache now, a folder per project."""
+    H = load(lua, ui_script(direct))
+    H.project_name, H.cache_location = "Show One", "D:/Cache/CacheClip"
+    H.click("SmoothBtn")
+    cmd = H.last_command()
+    quote = '"' if sys.platform.startswith("win") else "'"
+    assert f"--project {quote}Show One{quote}" in cmd
+    assert f"--cache-dir {quote}D:/Cache/CacheClip{quote}" in cmd
+    assert "--output-dir" not in cmd
+
+
+def test_an_output_folder_in_the_settings_wins(lua, direct):
+    conf = direct / "Installer" / "Eternal2x.conf"
+    conf.write_text(conf.read_text() + "output_dir=/renders\n")
+    H = load(lua, ui_script(direct))
+    H.cache_location = "D:/Cache/CacheClip"
+    H.click("SmoothBtn")
+    cmd = H.last_command()
+    assert "--output-dir" in cmd and "--cache-dir" not in cmd and "--project" not in cmd
+
+
 def test_every_render_plays_at_a_third_of_the_speed(lua, direct):
     """There is no setting for it: every render comes out three times
     longer, with more drawn frames to time remap. An upscale alone has
