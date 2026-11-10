@@ -114,6 +114,16 @@ def test_a_project_name_becomes_a_folder_windows_can_make(tmp_path):
     assert got == tmp_path / "Upflow2x" / "a_b__c_d_e_f_g_h_"
 
 
+@pytest.mark.parametrize("project,folder", [("NUL", "_NUL"), ("com1.final", "_com1.final"),
+                                            ("Console", "Console")])
+def test_a_project_named_like_a_device_still_gets_a_folder(tmp_path, project, folder):
+    """Windows will not make a folder called NUL or COM1."""
+    out = smooth._output_path(tmp_path / "clip.avi", None, "png", project=project,
+                              cache=str(tmp_path / "CacheClip"))
+    out.mkdir()
+    assert out.parent == tmp_path / "Upflow2x" / folder and out.is_dir()
+
+
 def test_a_cache_on_a_missing_drive_leaves_renders_in_videos(make_anime, monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
