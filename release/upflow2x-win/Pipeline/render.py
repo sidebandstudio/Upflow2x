@@ -369,10 +369,21 @@ def _iter_plan_frames(cap: cv2.VideoCapture, indices: Sequence[int]) -> Iterator
 # How many in-betweens are drawn before they are written.
 BATCH = 8
 
-# Threads that encode and write PNG frames. A 4K PNG takes about as long to
-# encode as the GPU takes to draw and upscale a frame, and OpenCV lets go of
-# Python while it encodes, so the two overlap. One core is left for Resolve.
-WRITERS = max(1, min(3, (os.cpu_count() or 2) - 1))
+# Threads that draw the in-betweens at 2x and encode and write the frames,
+# while the network works on the next. Each 4K frame takes them longer than
+# the GPU takes to draw one, and OpenCV lets go of Python while it works, so
+# with three the GPU sat idle most of a render. Half the cores, so Resolve
+# keeps the rest.
+WORKERS = max(1, min(8, (os.cpu_count() or 2) // 2))
+# OpenCV's threads for each of them. Eight workers each spreading every
+# remap over all 32 threads of a 5950X slowed the thread feeding the GPU: a
+# render took 34.6 s that took 31.6 s with two each.
+CV_THREADS = max(1, (os.cpu_count() or 2) // (2 * WORKERS))
+
+
+def _ready(frame) -> np.ndarray:
+    """A frame, waiting for it if it is still being drawn."""
+    return frame.result() if isinstance(frame, Future) else frame
 
 # Encoders to try per container, best quality first.
 _ENCODERS = {
@@ -469,10 +480,12 @@ def render_plan(
         buckets[i].append(p - i)
 
     cap = _open(source, frames, progress)
-    pool = ThreadPoolExecutor(max_workers=WRITERS) if is_sequence else None
-    # Frames still being written, oldest first. A few at most, so a fast GPU
-    # can't fill memory with 4K frames waiting for the disk.
-    pending: Deque[Future] = deque()
+    threads = cv2.getNumThreads()
+    cv2.setNumThreads(CV_THREADS)
+    pool = ThreadPoolExecutor(max_workers=WORKERS)
+    # Frames still being drawn or written, oldest first. A few at most, so a
+    # fast GPU can't fill memory with 4K frames waiting for the disk.
+    pending: Deque = deque()
 
     def write_png(frame: np.ndarray, target: Path, number: int) -> None:
         # Encode in memory and let Python write the file. cv2.imwrite
@@ -487,43 +500,67 @@ def render_plan(
             raise SourceError(f"Could not write {target}: {exc}. Check the disk "
                               "has space and the folder is writable.") from exc
 
-    state = {"writer": None, "written": 0, "width": 0, "height": 0, "upscaler": upscaler,
-             "upscale_note": upscale_note, "last_in": None, "last_out": None}
+    state = {"writer": None, "written": 0, "flushed": 0, "width": 0, "height": 0,
+             "upscaler": upscaler, "upscale_note": upscale_note}
 
-    def emit(frame: np.ndarray) -> None:
-        """Upscale if asked, then write one output frame."""
-        if state["upscaler"] is not None:
-            # A held drawing comes through once for every frame it is held,
-            # and the network would draw the same picture again each time.
-            if state["last_in"] is not None and np.array_equal(frame, state["last_in"]):
-                frame = state["last_out"]
-            else:
-                try:
-                    big = state["upscaler"].upscale(frame)
-                except AIUnavailable as exc:
-                    # Past the first frame, the frames so far are 2x and the rest
-                    # cannot be left at 1x, so the render stops and says why.
-                    if state["written"]:
-                        raise
-                    state["upscaler"], state["upscale_note"] = None, str(exc)
-                else:
-                    state["last_in"], state["last_out"] = frame, big
-                    frame = big
-        if factor > 1:
-            frame = upscale(frame, factor)
-        if state["written"] and frame.shape[:2] != (state["height"], state["width"]):
-            raise SourceError(f"Frame {state['written']} came out "
+    def finish(frame, number: int) -> None:
+        """Write one frame once it is drawn. In the pool for a sequence."""
+        frame = _ready(frame)
+        if frame.shape[:2] != (state["height"], state["width"]):
+            raise SourceError(f"Frame {number} came out "
                               f"{frame.shape[1]}x{frame.shape[0]}, not "
                               f"{state['width']}x{state['height']}.")
-        state["height"], state["width"] = frame.shape[:2]
         if is_sequence:
-            target = output / f"frame_{state['written']:06d}.png"
-            # A write that failed raises here, on the next frame.
-            while len(pending) >= 2 * WRITERS:
-                pending.popleft().result()
-            pending.append(pool.submit(write_png, frame, target, state["written"]))
+            write_png(frame, output / f"frame_{number:06d}.png", number)
         else:
-            if state["writer"] is None:
+            state["writer"].write(frame)
+
+    def flush() -> None:
+        """Wait for the oldest pending frame. One that failed raises here."""
+        item = pending.popleft()
+        if is_sequence:
+            item.result()
+        else:
+            # A video takes its frames in order, so they are written here.
+            finish(item, state["flushed"])
+        state["flushed"] += 1
+    # The last two frames upscaled and their 2x versions: the pair of drawings
+    # being drawn between, or a held drawing.
+    drawn: Deque[Tuple[np.ndarray, np.ndarray]] = deque(maxlen=2)
+
+    def upscaled(frame: np.ndarray) -> Optional[np.ndarray]:
+        """`frame` at 2x, or None where the network does not run."""
+        if state["upscaler"] is None:
+            return None
+        # A drawing is in two pairs, and a held one comes through once for
+        # every frame it is held. The network would draw it again each time.
+        for given, big in drawn:
+            if given is frame or np.array_equal(given, frame):
+                return big
+        try:
+            big = state["upscaler"].upscale(frame)
+        except AIUnavailable as exc:
+            # Past the first frame, the frames so far are 2x and the rest
+            # cannot be left at 1x, so the render stops and says why.
+            if state["written"]:
+                raise
+            state["upscaler"], state["upscale_note"] = None, str(exc)
+            return None
+        drawn.append((frame, big))
+        return big
+
+    def emit(frame, is_2x: bool = False) -> None:
+        """Upscale if asked and not done, then write one output frame, or a
+        Future of one still being drawn."""
+        if not is_2x:
+            big = upscaled(frame)
+            if big is not None:
+                frame = big
+        if factor > 1:
+            frame = upscale(frame, factor)
+        if not state["written"]:
+            state["height"], state["width"] = _ready(frame).shape[:2]
+            if not is_sequence:
                 # Every writer here rounds an odd size down to even without a
                 # word, so the file would be a pixel short of what it reports.
                 if state["width"] % 2 or state["height"] % 2:
@@ -534,7 +571,12 @@ def render_plan(
                         f"any size.")
                 state["writer"] = _writer(output, (state["width"], state["height"]),
                                           plan.fps)
-            state["writer"].write(frame)
+        while len(pending) >= 2 * WORKERS:
+            flush()
+        if is_sequence:
+            pending.append(pool.submit(finish, frame, state["written"]))
+        else:
+            pending.append(frame)
         state["written"] += 1
         if progress and positions:
             # A GPU that gave out mid-render leaves the rest to the CPU, which
@@ -600,14 +642,19 @@ def render_plan(
             # 30 GB before the first was written.
             for at in range(0, len(times), BATCH):
                 part = times[at:at + BATCH]
+                big = None
                 if pair is not None:
-                    produced = pair(prev, curr, part, unrelated=unrelated)
+                    # Only the drawings are upscaled. The in-betweens are drawn
+                    # at 2x from them.
+                    big = upscaled(prev), upscaled(curr)
+                    big = None if big[0] is None or big[1] is None else big
+                    produced = pair(prev, curr, part, unrelated=unrelated, big=big, pool=pool)
                 else:
                     # De-duplicate only: every output frame is a real drawing,
                     # nothing is synthesised, and each starts where it did.
                     produced = [(prev if t < 1.0 else curr).copy() for t in part]
                 for frame in produced:
-                    emit(frame)
+                    emit(frame, is_2x=big is not None)
             if moves:
                 before, here = here, after
             window.popleft()
@@ -618,14 +665,15 @@ def render_plan(
         while state["written"] < len(positions):
             emit(prev)
         while pending:
-            pending.popleft().result()
+            flush()
     finally:
+        # Even on the way out of an error, no write is left going, and no
+        # frame is drawn that will not be written.
+        pool.shutdown(wait=True, cancel_futures=True)
+        cv2.setNumThreads(threads)
         cap.release()
         if state["writer"] is not None:
             state["writer"].release()
-        if pool is not None:
-            # Even on the way out of an error, no write is left going.
-            pool.shutdown(wait=True)
 
     return RenderResult(
         output=output,

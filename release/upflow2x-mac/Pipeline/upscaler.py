@@ -93,12 +93,16 @@ class Upscaler:
     def upscale(self, frame: np.ndarray) -> np.ndarray:
         """`frame` at twice its width and height, BGR in and out."""
         h, w = frame.shape[:2]
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        y = self._infer(rgb.astype(np.float32).transpose(2, 0, 1)[None] / 255.0)
+        x = np.empty((1, 3, h, w), np.float32)
+        for c in range(3):
+            # RGB from 0 to 1, from OpenCV's BGR from 0 to 255.
+            cv2.multiply(cv2.extractChannel(frame, 2 - c), 1.0 / 255.0, dst=x[0, c],
+                         dtype=cv2.CV_32F)
+        y = self._infer(x)
         expected = (1, 3, 2 * h, 2 * w)
         if getattr(y, "shape", None) != expected or not np.isfinite(y).all():
             raise AIUnavailable(f"The upscaler returned a broken frame (shape "
                                 f"{getattr(y, 'shape', '?')}, expected {expected}).")
         self.frames += 1
-        out = np.clip(y[0].transpose(1, 2, 0) * 255.0 + 0.5, 0, 255)
-        return cv2.cvtColor(out.astype(np.uint8), cv2.COLOR_RGB2BGR)
+        # Rounded and held to 0..255 as it goes back to 8 bits.
+        return cv2.merge([cv2.multiply(y[0, c], 255.0, dtype=cv2.CV_8U) for c in (2, 1, 0)])
