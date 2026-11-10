@@ -474,6 +474,8 @@ def test_a_reinstall_repairs_the_private_python_it_reuses(tmp_path, monkeypatch)
     gui = importlib.import_module("Installer.gui_installer")
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(gui, "_check_python", lambda path: True)
+    monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a[0], 0))
     python_dir = tmp_path / "python"
     python_dir.mkdir()
     (python_dir / "python.exe").write_bytes(b"")

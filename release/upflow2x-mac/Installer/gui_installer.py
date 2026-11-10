@@ -2,8 +2,8 @@
 Upflow2x GUI Installer
 
 Run it with `python Installer/gui_installer.py`, or compile it with
-Installer/build_installer.py. When it runs as a compiled app and finds no
-system Python, it downloads a private portable Python into the plugin folder.
+Installer/build_installer.py. The compiled app installs its bundled plugin
+files and a private Python into the user's application data folder.
 That works on both Windows (official embeddable package) and macOS
 (python-build-standalone).
 """
@@ -88,14 +88,26 @@ _NO_WINDOW = ({"creationflags": subprocess.CREATE_NO_WINDOW}
 
 def _find_repo_root() -> Path:
     if getattr(sys, "frozen", False):
-        here = Path(sys.executable).resolve().parent
-        # A macOS app runs from Upflow2xInstaller.app/Contents/MacOS, so the
-        # plugin folder is the one holding the bundle, not the bundle itself.
-        for parent in (here, *here.parents):
-            if parent.suffix == ".app":
-                return parent.parent
-        return here
+        return Path(sys._MEIPASS) / "plugin"
     return Path(__file__).resolve().parent.parent
+
+
+def _install_dir() -> Path:
+    if sys.platform.startswith("win"):
+        return Path(os.environ["LOCALAPPDATA"]) / "Upflow2x"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Upflow2x"
+    return Path.home() / ".local" / "share" / "Upflow2x"
+
+
+def _copy_plugin(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        if item.is_dir():
+            shutil.copytree(item, destination / item.name, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        else:
+            shutil.copy2(item, destination / item.name)
 
 
 def _read_version(repo_root: Path) -> str:
@@ -108,7 +120,7 @@ def _read_version(repo_root: Path) -> str:
 def _check_python(path: str) -> bool:
     try:
         result = subprocess.run(
-            [path, "--version"],
+            [path, "-c", "import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] < (3, 15)))"],
             capture_output=True, text=True, timeout=10, **_NO_WINDOW,
         )
         return result.returncode == 0
@@ -166,7 +178,10 @@ def _find_embedded_python(repo_root: Path) -> str | None:
         except OSError:
             pass
     if exe.exists() and _check_python(str(exe)):
-        return str(exe)
+        result = subprocess.run([str(exe), "-m", "pip", "--version"],
+                                capture_output=True, text=True, timeout=10, **_NO_WINDOW)
+        if result.returncode == 0:
+            return str(exe)
     return None
 
 
@@ -261,8 +276,9 @@ class InstallerApp:
         sh = self.root.winfo_screenheight()
         self.root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
 
-        self.repo_root = _find_repo_root()
-        self.version = _read_version(self.repo_root)
+        self.source_root = _find_repo_root()
+        self.repo_root = _install_dir() if getattr(sys, "frozen", False) else self.source_root
+        self.version = _read_version(self.source_root)
         self.installing = False
         self.install_done = False
         self.python_path: str | None = None
@@ -364,7 +380,8 @@ class InstallerApp:
         self.close_btn.pack(side="left", padx=8)
 
         self._log("Ready to install Upflow2x.", "accent")
-        self._log("Click Install to begin.\n", "dim")
+        self._log("Click Install. Setup handles Python and the plugin for you.", "dim")
+        self._log("Keep your internet connection on until setup finishes.\n", "dim")
 
     # ---- Logging / progress -----------------------------------------------
 
@@ -564,7 +581,7 @@ class InstallerApp:
     # ---- Package installation ---------------------------------------------
 
     def _install_packages(self, python_path: str) -> bool:
-        req_file = self.repo_root / "requirements.txt"
+        req_file = self.source_root / "requirements.txt"
         if req_file.exists():
             pip_cmd = [python_path, "-m", "pip", "install",
                        "-r", str(req_file), "--no-warn-script-location", "--quiet"]
@@ -595,10 +612,10 @@ class InstallerApp:
         self.root.after(0, self._set_progress, 5, "Checking files...")
 
         required = [
-            self.repo_root / "Installer" / "Eternal2xLauncher.lua",
-            self.repo_root / "Installer" / "Eternal2x.lua",
-            self.repo_root / "Stages" / "resolve_smooth.py",
-            self.repo_root / "Pipeline" / "config.py",
+            self.source_root / "Installer" / "Eternal2xLauncher.lua",
+            self.source_root / "Installer" / "Eternal2x.lua",
+            self.source_root / "Stages" / "resolve_smooth.py",
+            self.source_root / "Pipeline" / "config.py",
         ]
         missing = [str(p) for p in required if not p.exists()]
         if missing:
@@ -621,7 +638,7 @@ class InstallerApp:
         if python_path:
             self.root.after(0, self._log,
                             f"  Using bundled Python: {_python_version_str(python_path)}", "ok")
-        else:
+        elif not getattr(sys, "frozen", False):
             python_path = _find_system_python()
             python_source = "system"
 
@@ -630,7 +647,6 @@ class InstallerApp:
                             f"  Found: {_python_version_str(python_path)}", "ok")
 
         if not python_path:
-            self.root.after(0, self._log, "  Python not found on this system.", "dim")
             self.root.after(0, self._log,
                             "  Setting up a private Python for the plugin...", "accent")
             python_path = self._setup_embedded_python()
@@ -652,6 +668,10 @@ class InstallerApp:
 
         self.root.after(0, self._set_progress, 75, "")
         self.root.after(0, self._log, "  Packages installed.", "ok")
+
+        if self.source_root != self.repo_root:
+            self.root.after(0, self._log, "\nInstalling plugin files...")
+            _copy_plugin(self.source_root, self.repo_root)
 
         # --- Step 4: Copy launcher into Resolve ---
         self.root.after(0, self._log, "\nInstalling plugin into DaVinci Resolve...")
@@ -690,9 +710,7 @@ class InstallerApp:
         if python_source == "embedded":
             self.root.after(0, self._log, "")
             self.root.after(0, self._log,
-                            "Note: A private Python was installed in the plugin", "dim")
-            self.root.after(0, self._log,
-                            "folder. Do not delete the 'python' subfolder.", "dim")
+                            "Python is set up for Upflow2x. No other setup is needed.", "dim")
 
         self.install_done = True
         self.root.after(0, lambda: self.install_btn.configure(
@@ -705,6 +723,10 @@ class InstallerApp:
 
 def main():
     app = InstallerApp()
+    if getattr(sys, "frozen", False) and sys.platform.startswith("win"):
+        # External Python must load its own DLLs, not the installer's copies.
+        import ctypes
+        ctypes.windll.kernel32.SetDllDirectoryW(None)
     app.run()
 
 

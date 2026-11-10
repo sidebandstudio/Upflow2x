@@ -31,7 +31,8 @@ PLATFORMS = {"upflow2x-mac": "macos", "upflow2x-win": "windows"}
 
 # What ships to users. Tests, release artefacts and dev tooling stay behind.
 PAYLOAD = ["Pipeline", "Stages", "Installer", "VERSION", "README.md",
-           "requirements.txt"]
+           "requirements.txt", "LICENSE.md"]
+INSTALLERS = ("Upflow2xInstaller.exe", "Upflow2xInstaller-mac.zip")
 SKIP_DIRS = {"__pycache__", ".pytest_cache"}
 SKIP_SUFFIXES = {".pyc", ".pyo"}
 
@@ -95,10 +96,35 @@ def verify_feed(meta: dict) -> bool:
     return ok
 
 
+def verify_installers(version: str) -> bool:
+    """Check that the standalone downloads contain the binaries just built."""
+    import urllib.error
+    import urllib.request
+
+    for name in INSTALLERS:
+        url = f"https://github.com/{REPO}/releases/download/{release_tag(version)}/{name}"
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:
+                digest = hashlib.sha256(response.read()).hexdigest()
+        except (urllib.error.URLError, OSError) as exc:
+            print(f"  {name}: FAILED, {exc}")
+            return False
+        if digest != sha256(REPO_ROOT / "dist" / name):
+            print(f"  {name}: checksum mismatch against the published file")
+            return False
+    return True
+
+
 def publish(version: str) -> bool:
     """Create the GitHub release, with the tag derived from VERSION."""
     tag = release_tag(version)
     archives = [str(REPO_ROOT / "release" / f"{name}.zip") for name in PLATFORMS]
+    installers = [REPO_ROOT / "dist" / name for name in INSTALLERS]
+    missing = [path.name for path in installers if not path.is_file()]
+    if missing:
+        print("  Missing standalone installers: " + ", ".join(missing))
+        return False
+    archives.extend(str(path) for path in installers)
     existing = subprocess.run(["gh", "release", "view", tag, "--repo", REPO],
                               capture_output=True, text=True)
     if existing.returncode == 0:
@@ -241,7 +267,7 @@ def main() -> int:
         if not publish(version):
             return 1
         print("Verifying the published downloads")
-        if not verify_feed(meta):
+        if not verify_feed(meta) or not verify_installers(version):
             print("The published downloads do not match this build, so "
                   "update/latest.json was left untouched. If shipped files changed "
                   f"since {tag} went out, bump VERSION and release again.")

@@ -64,28 +64,34 @@ which is where retimers tear, melt and double lines.
 - **DaVinci Resolve Studio** 18 or newer. Since 19.1 the free edition blocks
   script panels like this one, so it cannot open Upflow2x. Without a GPU, the
   2x upscale falls back to Super Scale, which is Studio only too.
-- Python 3.10 to 3.14 on your PATH, from
-  [python.org](https://www.python.org/downloads/latest/python3.14/). 3.15 is too
-  new for the AI runtime, and on an Intel Mac it stops at 3.13.
+- An internet connection during setup and the first render. Setup installs
+  a private Python for Upflow2x automatically.
 
 ## Install
 
 ### With the installer window
 
-1. Extract the download somewhere permanent.
-2. From the folder that contains `Installer`, run `python Installer/gui_installer.py`
-   (`python3` on macOS) and click **Install**.
-3. It installs `numpy` and `opencv-python`, copies the plugin into Resolve's
-   scripts folder and writes the config.
+1. Download `Upflow2xInstaller.exe` on Windows, or extract
+   `Upflow2xInstaller-mac.zip` and open `Upflow2xInstaller.app` on a Mac.
+2. Click **Install** and wait for setup to finish. No separate Python download
+   or terminal commands are needed.
+3. Setup stores the plugin and its private Python in `%LOCALAPPDATA%\Upflow2x`
+   on Windows, or `~/Library/Application Support/Upflow2x` on a Mac. The
+   downloaded installer can be deleted afterwards.
 4. Restart Resolve and open **Workspace → Scripts → Upflow2x**.
 
 Up to v0.4.0 the plugin was called Eternal2x, and those releases list it as
 **Workspace → Scripts → Eternal2x**.
 
-If the window does not open, your Python was built without Tk. Use the manual
-install below, which does the same job.
+Standalone installers ship with v0.5.1 and newer. Older releases and source
+ZIPs use the manual install below.
 
 ### Manual
+
+Extract the source ZIP somewhere permanent. This method requires Python
+3.10 to 3.14 from [python.org](https://www.python.org/downloads/). On an Intel
+Mac use at most 3.13, and on macOS 12 use at most 3.12. From the folder that
+contains `Installer`, run:
 
 ```
 python -m pip install numpy opencv-python
@@ -104,8 +110,8 @@ under Workspace → Scripts on every page:
 Earlier versions used the Comp folder, which Resolve only lists on the Fusion
 page. Re-running the installer moves it.
 
-The config records where the plugin folder is, so re-run the installer if you
-move it.
+For manual installs, the config records where the extracted folder is, so
+re-run the installer if you move it.
 
 ## Using it
 
@@ -264,10 +270,17 @@ drift apart.
 To build locally without publishing:
 
 ```
+python -m pip install pyinstaller==6.22.3
+python Installer/build_installer.py          # build this platform's standalone setup
 python Installer/build_release.py            # build the folders and zips
 python Installer/build_release.py --publish  # build, tag, upload, verify
 python Installer/build_release.py --verify   # check the live feed is sound
 ```
+
+Publishing requires both `dist/Upflow2xInstaller.exe` and
+`dist/Upflow2xInstaller-mac.zip`. The release workflow builds each on its native
+platform before publishing. The Mac build uses a universal Python and produces
+one app for Apple Silicon and Intel. Source ZIPs remain the update packages.
 
 `update/latest.json` always describes the release that is live, so only
 `--publish` writes it, and only once the uploaded files match the build. A

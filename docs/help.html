@@ -65,22 +65,15 @@
 
             <section id="windows" aria-labelledby="windows-title">
                 <h2 id="windows-title">Install on Windows</h2>
-                <p class="sub">Extract, run the installer, restart Resolve.</p>
+                <p class="sub">Open setup, click Install, restart Resolve.</p>
                 <ol class="os-steps">
                     <li>
-                        <h3>Download the Windows zip</h3>
-                        <p>Get <code>upflow2x-win.zip</code> from the <a href="download.html">download page</a>.</p>
+                        <h3>Open the Windows installer</h3>
+                        <p>Get <code>Upflow2xInstaller.exe</code> from the <a href="download.html">download page</a>, then double-click it.</p>
                     </li>
                     <li>
-                        <h3>Extract it somewhere permanent</h3>
-                        <p>Right-click the zip and choose Extract All. Put it somewhere it can stay, not your Downloads folder. If you move the folder after installing, run the installer again.</p>
-                    </li>
-                    <li>
-                        <h3>Run the installer</h3>
-                        <p>You need Python 3.10 to 3.14. Get <a href="https://www.python.org/downloads/latest/python3.14/">Python 3.14</a> from python.org, not 3.15, which is too new for the AI runtime. In its installer, tick <strong>Add python.exe to PATH</strong>.</p>
-                        <p>Open the extracted folder, then the <code>upflow2x-win</code> folder inside it, the one that contains <code>Installer</code>. Type <code>cmd</code> in the address bar, press Enter, and run:</p>
-                        <div class="code"><code>python Installer\gui_installer.py</code></div>
-                        <p>Click Install and wait for it to finish. It installs the Python packages, copies the panel into Resolve and writes the settings file.</p>
+                        <h3>Click Install</h3>
+                        <p>Keep your internet connection on and wait for setup to finish. It installs its own Python and puts Upflow2x in <code>%LOCALAPPDATA%\Upflow2x</code>. You do not need to install Python yourself or use a terminal. The downloaded installer can be deleted afterwards.</p>
                     </li>
                     <li>
                         <h3>Open it in Resolve</h3>
@@ -88,30 +81,20 @@
                         <span class="path">Workspace &rarr; Scripts &rarr; Upflow2x</span>
                     </li>
                 </ol>
-                <h3>If the installer window doesn't open</h3>
-                <p>Your Python was built without Tk. These two commands do the same job from the same folder, without a window. Then restart Resolve.</p>
-                <div class="code"><code>python -m pip install numpy opencv-python</code></div>
-                <div class="code"><code>python Installer/install_upflow2x.py</code></div>
+                <p>Standalone setup starts with v0.5.1. For an older ZIP, follow <a href="#manual">Manual installation</a>.</p>
             </section>
 
             <section id="macos" aria-labelledby="macos-title">
                 <h2 id="macos-title">Install on macOS</h2>
-                <p class="sub">The same steps, with Terminal.</p>
+                <p class="sub">Open setup, click Install, restart Resolve.</p>
                 <ol class="os-steps">
                     <li>
                         <h3>Download the macOS zip</h3>
-                        <p>Get <code>upflow2x-mac.zip</code> from the <a href="download.html">download page</a>.</p>
+                        <p>Get <code>Upflow2xInstaller-mac.zip</code> from the <a href="download.html">download page</a>.</p>
                     </li>
                     <li>
-                        <h3>Extract it somewhere permanent</h3>
-                        <p>Double-click the zip, then move the folder somewhere it can stay, like your home folder or Applications.</p>
-                    </li>
-                    <li>
-                        <h3>Run the installer</h3>
-                        <p>Which Python works depends on the Mac, because the AI runtime only has builds for some pairs. On macOS 14 or newer, use 3.10 to 3.14 on Apple Silicon and 3.10 to 3.13 on Intel. On macOS 13, use 3.10 to 3.13, and on macOS 12, 3.10 to 3.12. Get <a href="https://www.python.org/downloads/latest/python3.14/">3.14</a>, <a href="https://www.python.org/downloads/latest/python3.13/">3.13</a> or <a href="https://www.python.org/downloads/latest/python3.12/">3.12</a> from python.org. Then open Terminal and run:</p>
-                        <div class="code"><code>cd ~/path/to/upflow2x-mac
-python3 Installer/gui_installer.py</code></div>
-                        <p>Click Install and wait for it to finish. It works on Apple Silicon and Intel Macs.</p>
+                        <h3>Open setup and click Install</h3>
+                        <p>Double-click the zip, open <code>Upflow2xInstaller.app</code>, then click Install. Keep your internet connection on while it runs. The same app works on Apple Silicon and Intel. Setup installs its own Python and stores Upflow2x in <code>~/Library/Application Support/Upflow2x</code>.</p>
                     </li>
                     <li>
                         <h3>Open it in Resolve</h3>
@@ -119,10 +102,19 @@ python3 Installer/gui_installer.py</code></div>
                         <span class="path">Workspace &rarr; Scripts &rarr; Upflow2x</span>
                     </li>
                 </ol>
-                <h3>If the installer window doesn't open</h3>
-                <p>Run these from the same folder instead, then restart Resolve.</p>
+                <p>You can delete the downloaded app after installation. For v0.5.0 and earlier, follow <a href="#manual">Manual installation</a>.</p>
+            </section>
+
+            <section id="manual" aria-labelledby="manual-title">
+                <h2 id="manual-title">Manual installation</h2>
+                <p>Use this for source ZIPs and releases before v0.5.1. Extract the ZIP somewhere permanent. This method needs a separate Python installation from <a href="https://www.python.org/downloads/">python.org</a>.</p>
+                <p>Use Python 3.10 to 3.14 on Windows. On macOS 14 or newer, use 3.10 to 3.14 on Apple Silicon or 3.10 to 3.13 on Intel. On macOS 13, use 3.10 to 3.13, and on macOS 12 use 3.10 to 3.12. Open a terminal in the folder containing <code>Installer</code> and run:</p>
+                <div class="code"><code>python -m pip install numpy opencv-python</code></div>
+                <div class="code"><code>python Installer/install_upflow2x.py</code></div>
+                <p>On a Mac, use <code>python3</code>:</p>
                 <div class="code"><code>python3 -m pip install numpy opencv-python</code></div>
                 <div class="code"><code>python3 Installer/install_upflow2x.py</code></div>
+                <p>Restart Resolve, then open Workspace, Scripts, Upflow2x. Keep the extracted folder in place, or rerun the installer after moving it.</p>
             </section>
 
             <section id="usage" aria-labelledby="usage-title">
@@ -255,8 +247,7 @@ python3 Installer/gui_installer.py</code></div>
                     <details>
                         <summary>"python" is not recognised</summary>
                         <div class="answer">
-                            <p>Install <a href="https://www.python.org/downloads/latest/python3.14/">Python 3.14</a> from python.org. Any version from 3.10 to 3.14 works on Windows. 3.15 is too new for the AI runtime, and Upflow2x would keep every drawing as drawn. On a Mac the range depends on the macOS version. See <a href="#macos">Install on macOS</a>.</p>
-                            <p>On Windows, tick Add python.exe to PATH in its installer, then open a new Command Prompt window.</p>
+                            <p>The standalone setup installs Python automatically. Download the installer from the <a href="download.html">download page</a>. If you are using a source ZIP or an older release, follow <a href="#manual">Manual installation</a>.</p>
                         </div>
                     </details>
                 </div>
