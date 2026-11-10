@@ -200,8 +200,13 @@ python -m Stages.resolve_smooth --video shot.mov --base-hold 3 --no-interpolate
 python -m Stages.resolve_smooth --video grainy.mov --grain
 ```
 
-`--video` skips Resolve entirely and writes the result to an `Upflow2x` folder
-beside the source, or to `--output-dir`. Add `--network-upscale` and, where
+`--video` skips Resolve entirely and writes the result to `--output-dir`. Without
+it, the result goes in an `Upflow2x` folder beside `--cache-dir`, Resolve's cache
+folder, in a folder named by `--project`. With no cache folder, or one in
+OneDrive, it goes in Resolve's own folder instead,
+`%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or
+`~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a
+Mac. The panel passes the project and cache folder itself. Add `--network-upscale` and, where
 Real-ESRGAN runs on a GPU, the render is 2x. Without it, or without a GPU, the
 2x upscale is Resolve's Super Scale, applied when the panel imports the result,
 so a `--video` run stays at source resolution.
