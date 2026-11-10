@@ -64,8 +64,14 @@ which is where retimers tear, melt and double lines.
 - **DaVinci Resolve Studio** 18 or newer. Since 19.1 the free edition blocks
   script panels like this one, so it cannot open Upflow2x. Without a GPU, the
   2x upscale falls back to Super Scale, which is Studio only too.
-- An internet connection during setup and the first render. Setup installs
-  a private Python for Upflow2x automatically.
+- Windows 10 or 11, or macOS 12 or newer.
+- A DirectX 12 GPU on Windows draws the in-betweens and the 2x upscale. Without
+  one, and on a Mac, the in-betweens run on the CPU and Super Scale upscales.
+- An internet connection during setup and the first render, which downloads
+  about 50 MB. Setup installs a private Python for Upflow2x automatically.
+
+The installer window lists these before it installs anything, and the (i)
+at the top of the panel shows them again.
 
 ## Install
 
@@ -89,9 +95,9 @@ ZIPs use the manual install below.
 ### Manual
 
 Extract the source ZIP somewhere permanent. This method requires Python
-3.10 to 3.14 from [python.org](https://www.python.org/downloads/). On an Intel
-Mac use at most 3.13, and on macOS 12 use at most 3.12. From the folder that
-contains `Installer`, run:
+3.10 to 3.14 from [python.org](https://www.python.org/downloads/). An Intel Mac
+or macOS 13 needs 3.13 or older, and macOS 12 needs 3.12 or older. From the
+folder that contains `Installer`, run:
 
 ```
 python -m pip install numpy opencv-python

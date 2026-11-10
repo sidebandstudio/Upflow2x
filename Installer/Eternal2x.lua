@@ -937,10 +937,17 @@ local TIPS = {
     upscale = "Draw every frame at 2x with Real-ESRGAN's anime model, on the GPU on Windows. Without a GPU, Resolve's Super Scale does it.\nIt shows on a timeline bigger than the clip.",
     interp = "Draw the missing in-betweens with the RIFE network, on the GPU on Windows. Its first use downloads about 50 MB.\nThe render plays at a third of the clip's speed, ready to time remap.\nOff keeps every drawing on its frame and the clip's length, and draws nothing, to upscale only.",
     format = "Image sequence is lossless and imports most reliably. MP4 is one small file but lossy, and MKV is one lossless file. All are 8-bit RGB.",
+    -- The same list as Installer/install_upflow2x.py's REQUIREMENTS.
+    needs = "Upflow2x needs:\n"
+        .. "DaVinci Resolve Studio 18 or newer. The free edition blocks script panels.\n"
+        .. "Windows 10 or 11, or macOS 12 or newer.\n"
+        .. "A DirectX 12 GPU on Windows draws and upscales. Without one, and on a Mac, "
+        .. "the in-betweens run on the CPU and Super Scale upscales.\n"
+        .. "An internet connection for setup and the first render, which downloads about 50 MB.",
 }
 
-local function info(tip)
-    return ui:Label{ Text = "i", ToolTip = tip, StyleSheet = INFO, Weight = 0,
+local function info(tip, id)
+    return ui:Label{ ID = id, Text = "i", ToolTip = tip, StyleSheet = INFO, Weight = 0,
                      Alignment = { AlignCenter = true },
                      MinimumSize = { 16, 16 }, MaximumSize = { 16, 16 } }
 end
@@ -974,6 +981,7 @@ local win = disp:AddWindow({
         ui:Label{ ID = "SubTitle", Text = "v" .. CURRENT_VERSION, StyleSheet = VERSION, Weight = 0,
                   Alignment = { AlignRight = true, AlignVCenter = true } },
         ui:Button{ ID = "UpdateBtn", Text = "Check for Updates", StyleSheet = LINK, Weight = 0 },
+        info(TIPS.needs, "NeedsInfo"),
     },
 
     ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = CARD,

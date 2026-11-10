@@ -365,6 +365,52 @@ def test_install_reports_where_things_went(fake_home, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Launcher:" in out and "Config:" in out
     assert "Restart Resolve" in out
+    assert all(line in out for line in (*inst.REQUIREMENTS, inst.MANUAL_PYTHON))
+
+
+# What the download page says Upflow2x needs, in the words every copy uses.
+NEEDS = ["Studio 18", "Windows 10 or 11", "macOS 12", "DirectX 12", "50 MB"]
+
+
+def test_the_software_needs_what_the_site_says(repo_root):
+    site = (repo_root / "docs" / "index.html").read_text(encoding="utf-8")
+    specs = site.split('id="specs"')[1].split("</section>")[0]
+    readme = (repo_root / "README.md").read_text(encoding="utf-8").replace("**", "")
+    listed = " ".join(inst.REQUIREMENTS)
+    for need in NEEDS:
+        assert need in specs, f"the site no longer says {need!r}; update the software's list too"
+        assert need in listed and need in readme, f"{need!r} is missing from the software"
+
+
+@pytest.mark.parametrize("mac,help_says,software_says", [
+    ("Intel", "3.10 to 3.13 on Intel", "An Intel Mac or macOS 13 needs 3.13 or older"),
+    ("macOS 13", "On macOS 13, use 3.10 to 3.13", "An Intel Mac or macOS 13 needs 3.13 or older"),
+    ("macOS 12", "on macOS 12 use 3.10 to 3.12", "macOS 12 needs 3.12 or older"),
+])
+def test_the_software_gives_the_python_limits_the_mac_guide_does(repo_root, mac, help_says,
+                                                                  software_says):
+    """ONNX Runtime has no build past these, so a Mac on a newer Python draws
+    no in-betweens."""
+    guide = " ".join((repo_root / "docs" / "help.html").read_text(encoding="utf-8").split())
+    readme = " ".join((repo_root / "README.md").read_text(encoding="utf-8").split())
+    assert help_says in guide, f"the Mac guide changed its {mac} limit; update the software"
+    assert software_says in inst.MANUAL_PYTHON and software_says in readme
+
+
+def test_the_gui_installer_lists_the_requirements_before_installing(monkeypatch):
+    import importlib
+    from unittest import mock
+    gui = importlib.import_module("Installer.gui_installer")
+    monkeypatch.setattr(gui, "tk", mock.MagicMock())
+    monkeypatch.setattr(gui, "ttk", mock.MagicMock())
+    app = gui.InstallerApp.__new__(gui.InstallerApp)
+    app.root, app.repo_root, app.version = mock.MagicMock(), Path("/plugin"), "0.5.0"
+    logged = []
+    app._log = lambda msg, tag=None: logged.append(msg)
+    app._build_ui()
+    assert logged[0] == "Upflow2x needs:"
+    assert [m[2:] for m in logged[1:1 + len(inst.REQUIREMENTS)]] == list(inst.REQUIREMENTS)
+    app.log_text.see.assert_called_with("1.0")
 
 
 # --------------------------------------------------------------------------
