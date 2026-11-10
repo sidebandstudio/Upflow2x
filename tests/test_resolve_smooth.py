@@ -535,12 +535,15 @@ def _frames_left_when_discarded(monkeypatch):
     """What the render held just before it was deleted, one entry a delete."""
     left, real = [], smooth._discard
 
-    def discard(output):
-        if output.is_dir():
-            left.append(len(list(output.iterdir())))
-        else:
-            left.append(output.stat().st_size if output.exists() else 0)
-        real(output)
+    def discard(*renders):
+        held = 0
+        for output in dict.fromkeys(renders):
+            if output.is_dir():
+                held += len(list(output.iterdir()))
+            elif output.exists():
+                held += output.stat().st_size
+        left.append(held)
+        real(*renders)
 
     monkeypatch.setattr(smooth, "_discard", discard)
     return left
@@ -649,6 +652,35 @@ def test_a_chosen_folder_that_cannot_be_written_says_so(make_anime, monkeypatch,
                              "--output-dir", str(blocker / "Renders")]) == 2
     message = json.loads(status.read_text())["message"]
     assert "cannot save renders in" in message and "Save to" in message
+
+
+def test_a_video_that_fails_to_start_never_deletes_another_runs_render(make_anime, monkeypatch,
+                                                                        tmp_path):
+    """OpenCV deletes a video file its encoder cannot start. That freed the
+    name for another render, which this run's cleanup then deleted."""
+    src = make_anime(holds=(2,) * 6)
+    others = []
+
+    def encoder_fails(source, plan, output, cfg, **kwargs):
+        output.write_bytes(b"header")
+        output.unlink()
+        other = smooth._output_path(source, str(tmp_path / "o"), "mkv")
+        other.write_bytes(b"another run's finished render")
+        others.append(other)
+        raise smooth.SourceError("No encoder available for .mkv.")
+
+    monkeypatch.setattr(smooth, "render_plan", encoder_fails)
+    assert run(monkeypatch, ["--video", str(src), "--format", "mkv",
+                             "--output-dir", str(tmp_path / "o")]) == 2
+    assert others[0].read_bytes() == b"another run's finished render"
+    assert [p.name for p in (tmp_path / "o").iterdir()] == [others[0].name]
+
+
+def test_a_finished_video_ends_up_under_its_own_name(make_anime, monkeypatch, tmp_path):
+    src = make_anime(holds=(2,) * 6)
+    assert run(monkeypatch, ["--video", str(src), "--format", "mkv",
+                             "--output-dir", str(tmp_path / "o")]) == 0
+    assert [p.name for p in (tmp_path / "o").iterdir()] == [f"{src.stem}_smooth.mkv"]
 
 
 def test_two_renders_of_one_clip_never_share_a_folder(tmp_path):
