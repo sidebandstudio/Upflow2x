@@ -182,7 +182,7 @@
                     <details>
                         <summary>Clicking Upflow2x does nothing</summary>
                         <div class="answer">
-                            <p>Open Workspace, Console. If it says <code>UI script not found</code> or <code>Missing repo_root</code>, the plugin folder was moved, renamed or deleted after installing, since the settings file records its path. Run the installer again from where the folder is now. The panel's "Plugin folder not configured" means the same thing.</p>
+                            <p>Open Workspace, Console. If it says <code>UI script not found</code> or <code>Missing repo_root</code>, the plugin folder was moved, renamed or deleted after installing, since the settings file records its path. Run the installer again. After a manual install, run it from where the folder is now. The panel's "Plugin folder not configured" means the same thing.</p>
                         </div>
                     </details>
                     <details>
@@ -223,7 +223,7 @@
                         <summary>Progress seems stuck</summary>
                         <div class="answer">
                             <p>Press Refresh Progress. If the panel says Python hasn't started, or that there's been no progress for a few minutes, the run stopped. Press Reset and run it again.</p>
-                            <p>For anything else, email us the panel's status text and the <code>.upflow2x_last_run.log</code> file from the plugin folder.</p>
+                            <p>For anything else, email us the panel's status text and the <code>.upflow2x_last_run.log</code> file from the plugin folder, <code>%LOCALAPPDATA%\Upflow2x</code> on Windows or <code>~/Library/Application Support/Upflow2x</code> on a Mac.</p>
                         </div>
                     </details>
                     <details>
@@ -261,7 +261,7 @@
                 <h3>When you ask</h3>
                 <p>Press <strong>Check for Updates</strong> at any time. If nothing changed, it says so and leaves your install alone. A failed check never stops you working, and an update that can't finish is undone, so you keep the version you had.</p>
                 <div class="callout">
-                    <p><strong>Run the installer again</strong> once if you're updating from 0.3.1 or earlier. Those versions put the panel where Resolve lists it only on the Fusion page, or on Windows not at all. After that, you only need it if you move or rename the plugin folder.</p>
+                    <p><strong>Run the installer again</strong> once if you're updating from 0.3.1 or earlier. Those versions put the panel where Resolve lists it only on the Fusion page, or on Windows not at all. After that, you only need it if a manually installed plugin folder moves.</p>
                 </div>
             </section>
 

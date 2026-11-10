@@ -157,6 +157,8 @@ def test_primary_downloads_are_standalone_setup_and_manual_steps_are_separate(re
 
     download = page(repo_root, "download.html")
     assert set(re.findall(r'data-asset="([^"]+)"', download)) == set(INSTALLERS)
+    home = page(repo_root, "index.html")
+    assert set(re.findall(r'data-asset="([^"]+)"', home)) == set(INSTALLERS)
     help_text = page(repo_root, "help.html")
     for section in ("windows", "macos"):
         instructions = re.search(r'<section id="' + section + r'".*?</section>', help_text, re.S).group()
