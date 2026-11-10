@@ -264,13 +264,14 @@ def _output_path(source: Path, output_dir: Optional[str], fmt: str,
             target = base / f"{stem}_{n:02d}{suffix}"
 
 
-def _discard(output: Path) -> None:
-    """Delete a render that will not be used. `_output_path` made its path."""
-    with contextlib.suppress(OSError):
-        if output.is_dir():
-            shutil.rmtree(output, ignore_errors=True)
-        else:
-            output.unlink(missing_ok=True)
+def _discard(*renders: Path) -> None:
+    """Delete a render that will not be used, from the paths this run made."""
+    for render in dict.fromkeys(renders):
+        with contextlib.suppress(OSError):
+            if render.is_dir():
+                shutil.rmtree(render, ignore_errors=True)
+            else:
+                render.unlink(missing_ok=True)
 
 
 def drawing_marks(plan) -> list:
@@ -527,14 +528,22 @@ def _run(args, summary: dict) -> int:
         status.write(done=True, ok=False, message=str(exc))
         return 2
     print(f"Rendering to: {output}")
+    # A video is drawn into a file of this run's own and moved onto its name
+    # once done. The encoder deletes a file it cannot start, and another run
+    # could then take the name, and lose its render to this one's cleanup.
+    drawing = output if args.format == "png" else output.with_name(
+        f"{output.stem}.{os.getpid()}.part{output.suffix}")
     # A render that stops or fails never goes into Resolve, so its frames
     # would only take space. A 4K sequence is about 6 MB a frame. Once its
     # import has begun it stays, since the timeline may already use it.
     try:
-        result = render_plan(source, plan, output, cfg, progress=progress,
+        result = render_plan(source, plan, drawing, cfg, progress=progress,
                              sequence=(args.format == "png"), frames=frames)
         # Stopped while the last frames were written: nothing goes into Resolve.
         status.check_stop()
+        if drawing != output:
+            os.replace(drawing, output)
+            result.output = output
 
         print(f"Wrote {result.frames_written} frames at {result.fps:.3f} fps.")
         if result.note:
@@ -569,13 +578,13 @@ def _run(args, summary: dict) -> int:
             status.write(done=True, ok=True, message=_finished(plan, result))
             return 0
     except SourceError as exc:
-        _discard(output)
+        _discard(drawing, output)
         print(f"Error: {exc}")
         summary["error"] = str(exc)
         status.write(done=True, ok=False, message=str(exc))
         return 2
     except BaseException:
-        _discard(output)
+        _discard(drawing, output)
         raise
 
     # Too late to stop from here, or the clip would be left half placed.
