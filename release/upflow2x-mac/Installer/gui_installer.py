@@ -29,11 +29,11 @@ from tkinter import ttk
 # root is not on the path, so fall back to importing the sibling module.
 try:
     from Installer.install_upflow2x import (
-        _resolve_scripts_dir, remove_old_install, write_config)
+        REQUIREMENTS, _resolve_scripts_dir, remove_old_install, write_config)
 except ImportError:  # pragma: no cover - depends on how this was launched
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from install_upflow2x import (
-        _resolve_scripts_dir, remove_old_install, write_config)
+        REQUIREMENTS, _resolve_scripts_dir, remove_old_install, write_config)
 
 # ---------------------------------------------------------------------------
 # Python download sources
@@ -363,8 +363,12 @@ class InstallerApp:
         )
         self.close_btn.pack(side="left", padx=8)
 
-        self._log("Ready to install Upflow2x.", "accent")
-        self._log("Click Install to begin.\n", "dim")
+        self._log("Upflow2x needs:", "accent")
+        for line in REQUIREMENTS:
+            self._log(f"• {line}", "dim")
+        self._log("\nClick Install to begin.\n", "dim")
+        # The list comes first, however many lines it wraps to.
+        self.log_text.see("1.0")
 
     # ---- Logging / progress -----------------------------------------------
 
