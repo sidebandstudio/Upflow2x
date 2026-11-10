@@ -203,21 +203,33 @@ def default_output_dir(project: Optional[str] = None, cache: Optional[str] = Non
     else:
         # Support/Fusion/Scripts on Windows, Fusion/Scripts on a Mac.
         root = _resolve_scripts_root().parent.parent
+    return _per_project(root / "Upflow2x", project)
+
+
+def _per_project(base: Path, project: Optional[str]) -> Path:
+    """`base`, with a folder in it for the project's renders."""
     # A project name can hold anything. A folder name on Windows cannot, nor
     # can it be a device's, like NUL or COM1, even with an extension.
     name = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in project or "")
     name = name.strip(" .")
     if name.split(".")[0].strip().upper() in _DEVICES:
         name = "_" + name
-    return root / "Upflow2x" / name if name else root / "Upflow2x"
+    return base / name if name else base
 
 
 def _output_path(source: Path, output_dir: Optional[str], fmt: str,
                  frames: Optional[tuple] = None, slow: int = 1,
                  project: Optional[str] = None, cache: Optional[str] = None) -> Path:
     if output_dir:
-        base = Path(output_dir)
-        base.mkdir(parents=True, exist_ok=True)
+        # A folder chosen under Save to, which gets a folder per project too.
+        base = _per_project(Path(output_dir), project)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            tempfile.TemporaryFile(dir=base).close()
+        except OSError as exc:
+            raise SourceError(f"Upflow2x cannot save renders in {output_dir} "
+                              f"({exc.strerror or exc}). Plug in its drive, or choose "
+                              f"another folder under Save to.") from exc
     else:
         base = default_output_dir(project, cache)
         try:
@@ -299,8 +311,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "folder beside Resolve's cache folder, or in Resolve's own "
                              "folder).")
     parser.add_argument("--project", default=None,
-                        help="The Resolve project's name. Without --output-dir, its "
-                             "renders get a folder of their own.")
+                        help="The Resolve project's name. Its renders get a folder of "
+                             "their own.")
     parser.add_argument("--cache-dir", default=None,
                         help="Resolve's cache folder. Without --output-dir, renders go "
                              "in an Upflow2x folder beside it.")
@@ -506,8 +518,14 @@ def _run(args, summary: dict) -> int:
         status.write(done=True, ok=True, message=plan.describe())
         return 0
 
-    output = _output_path(source, args.output_dir, args.format, None if whole else frames,
-                          cfg.slow_motion, args.project, args.cache_dir)
+    try:
+        output = _output_path(source, args.output_dir, args.format, None if whole else frames,
+                              cfg.slow_motion, args.project, args.cache_dir)
+    except SourceError as exc:
+        print(f"Error: {exc}")
+        summary["error"] = str(exc)
+        status.write(done=True, ok=False, message=str(exc))
+        return 2
     print(f"Rendering to: {output}")
     # A render that stops or fails never goes into Resolve, so its frames
     # would only take space. A 4K sequence is about 6 MB a frame. Once its
