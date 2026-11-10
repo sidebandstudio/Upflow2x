@@ -437,7 +437,11 @@ function H.load(script_path, clip_file_path)
     H.prints = {}
     H.window = nil
 
-    _G.fu = { UIManager = ui }
+    -- Fusion's folder dialog hands back H.chosen_dir, or nothing for Cancel.
+    _G.fu = { UIManager = ui, RequestDir = function(_self, start)
+        H.dir_dialog_start = start or ""
+        return H.chosen_dir
+    end }
     _G.bmd = bmd
 
     -- Resolve hands Lua scripts a Resolve() global, as in Blackmagic's
