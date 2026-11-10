@@ -10,7 +10,10 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -18,6 +21,8 @@ from typing import Optional, Tuple
 
 # numpy and OpenCV load through these. A Python without them must still be
 # able to tell the panel so, or the panel waits on a run that never started.
+from Installer.install_upflow2x import _resolve_scripts_root
+
 try:
     from Pipeline import resolve_bridge as bridge
     from Pipeline.config import Upflow2xConfig
@@ -170,10 +175,73 @@ def _finished(plan, result) -> str:
     return message
 
 
+_DEVICES = {"CON", "PRN", "AUX", "NUL"} | {f"{port}{n}" for port in ("COM", "LPT")
+                                           for n in range(1, 10)}
+
+
+def _in_onedrive(path: Path) -> bool:
+    """Whether OneDrive syncs `path`, from the folders it sets in the environment.
+    Both are resolved first, so a short 8.3 name or a .. cannot hide it."""
+    path = path.resolve()
+    roots = [os.environ.get(key) for key in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")]
+    return any(root and (path == Path(root).resolve() or Path(root).resolve() in path.parents)
+               for root in roots)
+
+
+def default_output_dir(project: Optional[str] = None, cache: Optional[str] = None) -> Path:
+    """Where renders go unless the panel is told otherwise: an Upflow2x folder
+    beside Resolve's cache folder, with a folder for each project.
+
+    Beside each clip, a render landed in whatever folder the clip came from,
+    among the recordings. Resolve keeps its own working files in its cache
+    folder, by default Videos\\CacheClip. Where a project has none, or it is
+    in OneDrive, which would upload gigabytes of frames, renders go in
+    Resolve's own folder, the one its scripts are installed in.
+    """
+    if cache and Path(cache).is_absolute() and not _in_onedrive(Path(cache).parent):
+        base = Path(cache).parent / "Upflow2x"
+    else:
+        # Support/Fusion/Scripts on Windows, Fusion/Scripts on a Mac. Setup
+        # puts the plugin in its Upflow2x folder, so renders get one of their
+        # own there, and a project called Pipeline can't land among its code.
+        base = _resolve_scripts_root().parent.parent / "Upflow2x" / "Renders"
+    return _per_project(base, project)
+
+
+def _per_project(base: Path, project: Optional[str]) -> Path:
+    """`base`, with a folder in it for the project's renders."""
+    # A project name can hold anything. A folder name on Windows cannot, nor
+    # can it be a device's, like NUL or COM1, even with an extension.
+    name = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in project or "")
+    name = name.strip(" .")
+    if name.split(".")[0].strip().upper() in _DEVICES:
+        name = "_" + name
+    return base / name if name else base
+
+
 def _output_path(source: Path, output_dir: Optional[str], fmt: str,
-                 frames: Optional[tuple] = None, slow: int = 1) -> Path:
-    base = Path(output_dir) if output_dir else source.parent / "Upflow2x"
-    base.mkdir(parents=True, exist_ok=True)
+                 frames: Optional[tuple] = None, slow: int = 1,
+                 project: Optional[str] = None, cache: Optional[str] = None) -> Path:
+    if output_dir:
+        # A folder chosen under Save to, which gets a folder per project too.
+        base = _per_project(Path(output_dir), project)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            tempfile.TemporaryFile(dir=base).close()
+        except OSError as exc:
+            raise SourceError(f"Upflow2x cannot save renders in {output_dir} "
+                              f"({exc.strerror or exc}). Plug in its drive, or choose "
+                              f"another folder under Save to.") from exc
+    else:
+        base = default_output_dir(project, cache)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            # A folder that is already there can still refuse files.
+            tempfile.TemporaryFile(dir=base).close()
+        except OSError:
+            # The cache can be on a drive that is not plugged in, or read only.
+            base = default_output_dir(project)
+            base.mkdir(parents=True, exist_ok=True)
     suffix = FORMATS.get(fmt, "")
     # Name a trimmed render after its range, so two cuts of one file differ,
     # and a slowed one after how much slower.
@@ -182,17 +250,30 @@ def _output_path(source: Path, output_dir: Optional[str], fmt: str,
         part += f"_{slow}x"
     stem = f"{source.stem}{part}_smooth"
 
-    def taken(path: Path) -> bool:
-        if not path.exists():
-            return False
-        return any(path.iterdir()) if path.is_dir() else True
-
     target = base / f"{stem}{suffix}"
     n = 1
-    while taken(target):
-        n += 1
-        target = base / f"{stem}_{n:02d}{suffix}"
-    return target
+    while True:
+        # Made here, so two runs at once never share a path, and a run that
+        # stops or fails only ever deletes its own render.
+        try:
+            if suffix:
+                target.open("x").close()
+            else:
+                target.mkdir()
+            return target
+        except FileExistsError:
+            n += 1
+            target = base / f"{stem}_{n:02d}{suffix}"
+
+
+def _discard(*renders: Path) -> None:
+    """Delete a render that will not be used, from the paths this run made."""
+    for render in dict.fromkeys(renders):
+        with contextlib.suppress(OSError):
+            if render.is_dir():
+                shutil.rmtree(render, ignore_errors=True)
+            else:
+                render.unlink(missing_ok=True)
 
 
 def drawing_marks(plan) -> list:
@@ -230,7 +311,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Seconds into the file where the clip ends.")
     parser.add_argument("--output-dir", default=None,
                         help="Where to write the result (default: an Upflow2x "
-                             "folder beside the source).")
+                             "folder beside Resolve's cache folder, or in Resolve's own "
+                             "folder).")
+    parser.add_argument("--project", default=None,
+                        help="The Resolve project's name. Its renders get a folder of "
+                             "their own.")
+    parser.add_argument("--cache-dir", default=None,
+                        help="Resolve's cache folder. Without --output-dir, renders go "
+                             "in an Upflow2x folder beside it.")
     parser.add_argument("--format", default="png", choices=sorted(FORMATS),
                         help="png: lossless image sequence (default). "
                              "mp4: compact H.264 file. "
@@ -433,50 +521,73 @@ def _run(args, summary: dict) -> int:
         status.write(done=True, ok=True, message=plan.describe())
         return 0
 
-    output = _output_path(source, args.output_dir, args.format, None if whole else frames,
-                          cfg.slow_motion)
-    print(f"Rendering to: {output}")
     try:
-        result = render_plan(source, plan, output, cfg, progress=progress,
-                             sequence=(args.format == "png"), frames=frames)
+        output = _output_path(source, args.output_dir, args.format, None if whole else frames,
+                              cfg.slow_motion, args.project, args.cache_dir)
     except SourceError as exc:
         print(f"Error: {exc}")
         summary["error"] = str(exc)
         status.write(done=True, ok=False, message=str(exc))
         return 2
-    # Stopped while the last frames were written: nothing goes into Resolve.
-    status.check_stop()
+    print(f"Rendering to: {output}")
+    # A video is drawn into a file of this run's own and moved onto its name
+    # once done. The encoder deletes a file it cannot start, and another run
+    # could then take the name, and lose its render to this one's cleanup.
+    drawing = output if args.format == "png" else output.with_name(
+        f"{output.stem}.{os.getpid()}.part{output.suffix}")
+    # A render that stops or fails never goes into Resolve, so its frames
+    # would only take space. A 4K sequence is about 6 MB a frame. Once its
+    # import has begun it stays, since the timeline may already use it.
+    try:
+        result = render_plan(source, plan, drawing, cfg, progress=progress,
+                             sequence=(args.format == "png"), frames=frames)
+        # Stopped while the last frames were written: nothing goes into Resolve.
+        status.check_stop()
+        if drawing != output:
+            os.replace(drawing, output)
+            result.output = output
 
-    print(f"Wrote {result.frames_written} frames at {result.fps:.3f} fps.")
-    if result.note:
-        print(result.note)
-    if result.upscaled:
-        print(f"Upscaled 2x to {result.width}x{result.height} with Real-ESRGAN.")
-    elif cfg.network_upscale:
-        print(f"Real-ESRGAN did not run, so Super Scale does the upscale. {result.upscale_note}")
-    status.upscaled = result.upscaled
-    status.slow_motion = cfg.slow_motion
-    summary["render"] = result.to_dict()
+        print(f"Wrote {result.frames_written} frames at {result.fps:.3f} fps.")
+        if result.note:
+            print(result.note)
+        if result.upscaled:
+            print(f"Upscaled 2x to {result.width}x{result.height} with Real-ESRGAN.")
+        elif cfg.network_upscale:
+            print(f"Real-ESRGAN did not run, so Super Scale does the upscale. "
+                  f"{result.upscale_note}")
+        status.upscaled = result.upscaled
+        status.slow_motion = cfg.slow_motion
+        summary["render"] = result.to_dict()
 
-    # Resolve imports an image sequence from its first frame, not its folder.
-    if result.is_sequence:
-        frames = sorted(result.output.glob("*.png"))
-        status.import_path = str(frames[0]) if frames else str(result.output)
-        if frames:
-            status.sequence_pattern = str(result.output / SEQUENCE_PATTERN)
-            status.sequence_frames = len(frames)
-            status.fps = result.fps
-    else:
-        status.import_path = str(result.output)
+        # Resolve imports an image sequence from its first frame, not its folder.
+        if result.is_sequence:
+            frames = sorted(result.output.glob("*.png"))
+            status.import_path = str(frames[0]) if frames else str(result.output)
+            if frames:
+                status.sequence_pattern = str(result.output / SEQUENCE_PATTERN)
+                status.sequence_frames = len(frames)
+                status.fps = result.fps
+        else:
+            status.import_path = str(result.output)
 
-    if resolve is None:
-        # The panel has its own Resolve connection and finishes the import from
-        # there, which avoids depending on external scripting being enabled.
-        print(f"Rendered to: {result.output}")
-        summary["ok"] = True
-        summary["import_path"] = status.import_path
-        status.write(done=True, ok=True, message=_finished(plan, result))
-        return 0
+        if resolve is None:
+            # The panel has its own Resolve connection and finishes the import
+            # from there, which avoids depending on external scripting being
+            # enabled. A Stop can still come while this last status waits.
+            print(f"Rendered to: {result.output}")
+            summary["ok"] = True
+            summary["import_path"] = status.import_path
+            status.write(done=True, ok=True, message=_finished(plan, result))
+            return 0
+    except SourceError as exc:
+        _discard(drawing, output)
+        print(f"Error: {exc}")
+        summary["error"] = str(exc)
+        status.write(done=True, ok=False, message=str(exc))
+        return 2
+    except BaseException:
+        _discard(drawing, output)
+        raise
 
     # Too late to stop from here, or the clip would be left half placed.
     status.committed = True

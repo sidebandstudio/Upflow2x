@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -92,6 +93,98 @@ def test_the_rendered_file_lands_where_it_says(anime_in_resolve, monkeypatch, ca
     assert len(rendered) == 1
     assert rendered[0].stat().st_size > 0
     assert rendered[0].name in capsys.readouterr().out
+
+
+def test_renders_go_beside_resolves_cache_in_a_folder_per_project(tmp_path):
+    """Beside each clip, a render landed among the recordings it came from."""
+    cache = tmp_path / "work" / "CacheClip"
+    assert smooth.default_output_dir("Show", str(cache)) == tmp_path / "work" / "Upflow2x" / "Show"
+
+
+def resolves_folder(home: Path) -> Path:
+    """Where renders go in DaVinci Resolve's own folder, with the home and
+    APPDATA the tests set. The Upflow2x folder beside them holds the plugin."""
+    if sys.platform.startswith("win"):
+        resolve = home / "AppData" / "Roaming" / "Blackmagic Design" / "DaVinci Resolve" / "Support"
+    elif sys.platform == "darwin":
+        resolve = home / "Library" / "Application Support" / "Blackmagic Design" / "DaVinci Resolve"
+    else:
+        resolve = home / ".local" / "share" / "DaVinciResolve"
+    return resolve / "Upflow2x" / "Renders"
+
+
+@pytest.mark.parametrize("cache", [None, "", "CacheClip"])
+def test_without_a_cache_folder_renders_go_in_resolves_own_folder(tmp_path, cache):
+    """It is the one folder every Resolve has."""
+    folder = resolves_folder(tmp_path / "user-home")
+    assert smooth.default_output_dir("Show", cache) == folder / "Show"
+    assert smooth.default_output_dir(None, cache) == folder
+
+
+def test_a_cache_in_onedrive_leaves_renders_in_resolves_own_folder(monkeypatch, tmp_path):
+    """OneDrive would upload every frame, gigabytes for a few seconds of 4K."""
+    monkeypatch.setenv("OneDrive", str(tmp_path / "OneDrive"))
+    cache = tmp_path / "OneDrive" / "Videos" / "CacheClip"
+    folder = resolves_folder(tmp_path / "user-home")
+    assert smooth.default_output_dir("Show", str(cache)) == folder / "Show"
+    beside = tmp_path / "Videos" / "CacheClip"
+    assert smooth.default_output_dir("Show", str(beside)) == tmp_path / "Videos" / "Upflow2x" / "Show"
+
+
+def test_a_project_name_becomes_a_folder_windows_can_make(tmp_path):
+    got = smooth.default_output_dir('a<b>:c"d/e\\f|g?h*. ', str(tmp_path / "CacheClip"))
+    assert got == tmp_path / "Upflow2x" / "a_b__c_d_e_f_g_h_"
+
+
+@pytest.mark.parametrize("project,folder", [("NUL", "_NUL"), ("com1.final", "_com1.final"),
+                                            ("Console", "Console")])
+def test_a_project_named_like_a_device_still_gets_a_folder(tmp_path, project, folder):
+    """Windows will not make a folder called NUL or COM1."""
+    out = smooth._output_path(tmp_path / "clip.avi", None, "png", project=project,
+                              cache=str(tmp_path / "CacheClip"))
+    assert out.parent == tmp_path / "Upflow2x" / folder and out.is_dir()
+
+
+def test_another_spelling_of_a_onedrive_cache_is_still_onedrive(monkeypatch, tmp_path):
+    """A .. in the path, or a short 8.3 name, hid that it was in OneDrive."""
+    onedrive = tmp_path / "OneDrive"
+    (onedrive / "Videos").mkdir(parents=True)
+    (tmp_path / "Other").mkdir()
+    monkeypatch.setenv("OneDrive", str(onedrive))
+    folder = resolves_folder(tmp_path / "user-home") / "Show"
+    dotted = os.path.join(str(tmp_path), "Other", "..", "OneDrive", "Videos", "CacheClip")
+    assert smooth.default_output_dir("Show", dotted) == folder
+    if sys.platform.startswith("win"):
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        ctypes.windll.kernel32.GetShortPathNameW(str(onedrive / "Videos"), buf, 1024)
+        if buf.value and buf.value.lower() != str(onedrive / "Videos").lower():
+            assert smooth.default_output_dir("Show", buf.value + "\\CacheClip") == folder
+
+
+def test_a_folder_that_refuses_files_leaves_renders_in_resolves_own_folder(monkeypatch, tmp_path):
+    """mkdir succeeds on a folder that is already there, whatever it allows."""
+    beside = tmp_path / "work" / "Upflow2x" / "Show"
+    beside.mkdir(parents=True)
+    real = smooth.tempfile.TemporaryFile
+
+    def refuse(*args, dir=None, **kwargs):
+        if dir is not None and Path(dir) == beside:
+            raise PermissionError("Access is denied")
+        return real(*args, dir=dir, **kwargs)
+
+    monkeypatch.setattr(smooth.tempfile, "TemporaryFile", refuse)
+    out = smooth._output_path(tmp_path / "clip.avi", None, "png", project="Show",
+                              cache=str(tmp_path / "work" / "CacheClip"))
+    assert out.parent == resolves_folder(tmp_path / "user-home") / "Show"
+
+
+def test_a_cache_on_a_missing_drive_leaves_renders_in_resolves_own_folder(tmp_path):
+    blocker = tmp_path / "drive"
+    blocker.write_text("a file where the cache's drive would be")
+    out = smooth._output_path(tmp_path / "clip.avi", None, "png", project="Show",
+                              cache=str(blocker / "CacheClip"))
+    assert out.parent == resolves_folder(tmp_path / "user-home") / "Show"
 
 
 def test_the_default_output_is_a_lossless_sequence(anime_in_resolve, monkeypatch,
@@ -438,6 +531,192 @@ def test_a_stop_while_the_last_frames_are_written_still_counts(make_anime, monke
     payload = json.loads(status.read_text())
     assert payload["ok"] is False and payload["message"] == "Stopped."
     assert payload["import_path"] == "", "a stopped render must not be imported"
+    assert not list((tmp_path / "o").iterdir()), "its frames were left taking space"
+
+
+def _frames_left_when_discarded(monkeypatch):
+    """What the render held just before it was deleted, one entry a delete."""
+    left, real = [], smooth._discard
+
+    def discard(*renders):
+        held = 0
+        for output in dict.fromkeys(renders):
+            if output.is_dir():
+                held += len(list(output.iterdir()))
+            elif output.exists():
+                held += output.stat().st_size
+        left.append(held)
+        real(*renders)
+
+    monkeypatch.setattr(smooth, "_discard", discard)
+    return left
+
+
+@pytest.mark.parametrize("fmt", ["png", "mkv"])
+def test_a_render_stopped_partway_leaves_no_frames(make_anime, monkeypatch, tmp_path, fmt):
+    """It never goes into Resolve, and at 4K each frame left is about 6 MB."""
+    from Pipeline import render
+    src = make_anime(holds=(2,) * 8)
+    status = tmp_path / "status.json"
+    written = []
+
+    def wrote():
+        written.append(1)
+        if len(written) == 3:
+            status.with_suffix(".stop").write_text("")
+
+    if fmt == "png":
+        real_write = Path.write_bytes
+
+        def write_bytes(self, data):
+            result = real_write(self, data)
+            if self.suffix == ".png":
+                wrote()
+            return result
+
+        monkeypatch.setattr(Path, "write_bytes", write_bytes)
+    else:
+        real_writer = render._writer
+
+        def counting_writer(*a, **k):
+            inner = real_writer(*a, **k)
+
+            class Counting:
+                def write(self, frame):
+                    inner.write(frame)
+                    wrote()
+
+                def release(self):
+                    inner.release()
+
+            return Counting()
+
+        monkeypatch.setattr(render, "_writer", counting_writer)
+    left = _frames_left_when_discarded(monkeypatch)
+    assert run(monkeypatch, ["--video", str(src), "--format", fmt, "--status-file", str(status),
+                             "--output-dir", str(tmp_path / "o")]) == 1
+    assert json.loads(status.read_text())["message"] == "Stopped."
+    assert len(written) >= 3 and len(left) == 1 and left[0] > 0, "nothing was written to delete"
+    assert not list((tmp_path / "o").iterdir())
+
+
+def test_a_stop_while_the_final_status_waits_deletes_the_render(make_anime, monkeypatch,
+                                                                 tmp_path):
+    """The panel holds the status file while it reads it, so the last write
+    waits, and a Stop then means the render is never imported."""
+    src = make_anime(holds=(2,) * 8)
+    status = tmp_path / "status.json"
+    real_write = smooth.StatusFile.write
+
+    def write(self, *, done=False, ok=False, message=None):
+        if done and ok:
+            self.stop_path.write_text("")
+        return real_write(self, done=done, ok=ok, message=message)
+
+    monkeypatch.setattr(smooth.StatusFile, "write", write)
+    left = _frames_left_when_discarded(monkeypatch)
+    assert run(monkeypatch, ["--video", str(src), "--status-file", str(status),
+                             "--output-dir", str(tmp_path / "o")]) == 1
+    payload = json.loads(status.read_text())
+    assert payload["message"] == "Stopped." and payload["import_path"] == ""
+    assert left and left[0] == 16
+    assert not list((tmp_path / "o").iterdir())
+
+
+def test_a_delete_that_fails_still_reports_the_stop(make_anime, monkeypatch, tmp_path):
+    src = make_anime(holds=(2,) * 8)
+    status = tmp_path / "status.json"
+    _stop_after_render(monkeypatch, status)
+
+    def locked(*a, **k):
+        raise PermissionError("the folder is open in Explorer")
+
+    monkeypatch.setattr(smooth.shutil, "rmtree", locked)
+    assert run(monkeypatch, ["--video", str(src), "--status-file", str(status),
+                             "--output-dir", str(tmp_path / "o")]) == 1
+    assert json.loads(status.read_text())["message"] == "Stopped."
+
+
+def test_a_chosen_folder_gets_a_folder_per_project_too(tmp_path):
+    out = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "chosen"), "png",
+                              project="Show", cache=str(tmp_path / "work" / "CacheClip"))
+    assert out.parent == tmp_path / "chosen" / "Show"
+
+
+def test_a_chosen_folder_that_cannot_be_written_says_so(make_anime, monkeypatch, tmp_path,
+                                                         capsys):
+    """Its drive can be unplugged. Saving somewhere else unasked would lose
+    track of the render."""
+    src = make_anime(holds=(2,) * 6)
+    blocker = tmp_path / "drive"
+    blocker.write_text("a file where the drive would be")
+    status = tmp_path / "status.json"
+    assert run(monkeypatch, ["--video", str(src), "--status-file", str(status),
+                             "--output-dir", str(blocker / "Renders")]) == 2
+    message = json.loads(status.read_text())["message"]
+    assert "cannot save renders in" in message and "Save to" in message
+
+
+def test_a_video_that_fails_to_start_never_deletes_another_runs_render(make_anime, monkeypatch,
+                                                                        tmp_path):
+    """OpenCV deletes a video file its encoder cannot start. That freed the
+    name for another render, which this run's cleanup then deleted."""
+    src = make_anime(holds=(2,) * 6)
+    others = []
+
+    def encoder_fails(source, plan, output, cfg, **kwargs):
+        output.write_bytes(b"header")
+        output.unlink()
+        other = smooth._output_path(source, str(tmp_path / "o"), "mkv")
+        other.write_bytes(b"another run's finished render")
+        others.append(other)
+        raise smooth.SourceError("No encoder available for .mkv.")
+
+    monkeypatch.setattr(smooth, "render_plan", encoder_fails)
+    assert run(monkeypatch, ["--video", str(src), "--format", "mkv",
+                             "--output-dir", str(tmp_path / "o")]) == 2
+    assert others[0].read_bytes() == b"another run's finished render"
+    assert [p.name for p in (tmp_path / "o").iterdir()] == [others[0].name]
+
+
+def test_a_finished_video_ends_up_under_its_own_name(make_anime, monkeypatch, tmp_path):
+    src = make_anime(holds=(2,) * 6)
+    assert run(monkeypatch, ["--video", str(src), "--format", "mkv",
+                             "--output-dir", str(tmp_path / "o")]) == 0
+    assert [p.name for p in (tmp_path / "o").iterdir()] == [f"{src.stem}_smooth.mkv"]
+
+
+def test_two_renders_of_one_clip_never_share_a_folder(tmp_path):
+    """One that failed would delete the other's finished render."""
+    first = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "png")
+    second = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "png")
+    video = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "mp4")
+    again = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "mp4")
+    assert first != second and video != again
+    assert first.is_dir() and second.is_dir() and video.is_file() and again.is_file()
+
+
+def test_an_empty_folder_already_there_is_not_taken_over(tmp_path):
+    (tmp_path / "o" / "clip_smooth").mkdir(parents=True)
+    out = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "png")
+    assert out.name == "clip_smooth_02"
+
+
+def test_a_render_that_fails_partway_leaves_no_frames(make_anime, monkeypatch, tmp_path):
+    src = make_anime(holds=(2,) * 8)
+    real, written = Path.write_bytes, []
+
+    def fail_on_the_fifth(self, data):
+        if self.suffix == ".png":
+            written.append(self)
+            if len(written) == 5:
+                raise OSError("the disk is full")
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_on_the_fifth)
+    assert run(monkeypatch, ["--video", str(src), "--output-dir", str(tmp_path / "o")]) == 2
+    assert len(written) >= 5
+    assert not list((tmp_path / "o").iterdir())
 
 
 def _stop_after_render(monkeypatch, status):

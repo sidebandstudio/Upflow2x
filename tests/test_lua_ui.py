@@ -113,6 +113,13 @@ def test_every_control_has_a_handler(lua, direct):
         assert expected in handlers, f"no handler for {expected}"
 
 
+def test_the_panel_shows_what_upflow2x_needs(lua, direct):
+    from Installer.install_upflow2x import REQUIREMENTS
+    H = load(lua, ui_script(direct))
+    tip = H.widgets["NeedsInfo"].ToolTip
+    assert tip.splitlines() == ["Upflow2x needs:"] + list(REQUIREMENTS)
+
+
 def test_there_is_no_quality_choice(lua, direct):
     """Pixel tracking doubled lines and smeared fast characters, and no check
     caught every case, so the network draws every in-between."""
@@ -147,6 +154,129 @@ def test_output_format_selection_reaches_the_command(lua, direct):
     H.set_combo("FormatCombo", 1)      # MP4
     H.click("AnalyseBtn")
     assert "--format mp4" in H.last_command()
+
+
+def test_the_stage_hears_the_project_and_resolves_cache_folder(lua, direct):
+    """Renders landed beside each clip, among the recordings. They go beside
+    Resolve's cache now, a folder per project."""
+    H = load(lua, ui_script(direct))
+    H.project_name, H.cache_location = "Show One", "D:/Cache/CacheClip"
+    H.click("SmoothBtn")
+    cmd = H.last_command()
+    quote = '"' if sys.platform.startswith("win") else "'"
+    assert f"--project {quote}Show One{quote}" in cmd
+    assert f"--cache-dir {quote}D:/Cache/CacheClip{quote}" in cmd
+    assert "--output-dir" not in cmd
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Windows argument quoting")
+def test_a_folder_ending_in_a_backslash_keeps_the_next_argument(lua, direct):
+    """Quoted as it was, D:\\CacheClip\\ escaped its own closing quote, and
+    the status file went into the cache folder's name."""
+    import json
+    import subprocess
+
+    from Stages.resolve_smooth import build_parser
+    H = load(lua, ui_script(direct))
+    H.cache_location = "D:\\CacheClip\\"
+    H.click("SmoothBtn")
+    line = next(x for x in H.last_command().splitlines() if "-m Stages.resolve_smooth" in x)
+    line = line.split(" > ")[0].replace(
+        "-m Stages.resolve_smooth", '-c "import json, sys; print(json.dumps(sys.argv[1:]))"')
+    got = subprocess.run(line, capture_output=True, text=True, check=True)
+    args = build_parser().parse_args(json.loads(got.stdout))
+    assert args.cache_dir == "D:\\CacheClip\\"
+    assert args.status_file.endswith(".eternal2x_status.json")
+
+
+def test_an_output_folder_in_the_settings_wins(lua, direct):
+    conf = direct / "Installer" / "Eternal2x.conf"
+    conf.write_text(conf.read_text() + "output_dir=/renders\n")
+    H = load(lua, ui_script(direct))
+    H.project_name, H.cache_location = "Show", "D:/Cache/CacheClip"
+    H.click("SmoothBtn")
+    cmd = H.last_command()
+    assert "--output-dir" in cmd and "--cache-dir" not in cmd
+    assert "--project" in cmd, "a chosen folder gets a folder per project too"
+    assert H.combo_items("FolderCombo") == "Resolve's folder,/renders,Choose a folder..."
+    assert H.widgets["FolderCombo"].CurrentIndex == 1
+
+
+def conf_value(root, key):
+    for line in (root / "Installer" / "Eternal2x.conf").read_text().splitlines():
+        if line.startswith(key + "="):
+            return line.split("=", 1)[1]
+    return None
+
+
+def test_renders_save_to_resolves_folder_until_another_is_chosen(lua, direct):
+    H = load(lua, ui_script(direct))
+    assert H.combo_items("FolderCombo") == "Resolve's folder,Choose a folder..."
+    assert H.widgets["FolderCombo"].CurrentIndex == 0
+
+
+def test_a_folder_chosen_under_save_to_is_used_and_kept(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.chosen_dir = "D:/Renders/"
+    H.set_combo("FolderCombo", 1)
+    assert conf_value(direct, "output_dir") == "D:/Renders"
+    assert H.combo_items("FolderCombo") == "Resolve's folder,D:/Renders,Choose a folder..."
+    assert H.widgets["FolderCombo"].CurrentIndex == 1
+    H.click("SmoothBtn")
+    assert "--output-dir" in H.last_command()
+    # Opened again, the dialog starts from it, and choosing nothing keeps it.
+    H.chosen_dir = None
+    H.set_combo("FolderCombo", 2)
+    assert H.dir_dialog_start == "D:/Renders"
+    assert conf_value(direct, "output_dir") == "D:/Renders"
+    assert H.widgets["FolderCombo"].CurrentIndex == 1
+
+
+@pytest.mark.parametrize("chosen,kept", [("D:\\", "D:\\"), ("D:/", "D:/"), ("/", "/"),
+                                         ("D:\\Renders\\", "D:\\Renders")])
+def test_a_drive_or_disk_root_can_be_chosen(lua, direct, chosen, kept):
+    """D: alone is the folder that drive was last in, and / trimmed is nothing."""
+    H = load(lua, ui_script(direct))
+    H.chosen_dir = chosen
+    H.set_combo("FolderCombo", 1)
+    assert conf_value(direct, "output_dir") == kept
+
+
+def test_an_event_that_changes_nothing_refills_nothing(lua, direct):
+    """Resolve may deliver the refill's own index changes after it."""
+    H = load(lua, ui_script(direct))
+    H.chosen_dir = "D:/Renders/"
+    H.set_combo("FolderCombo", 1)
+    lua.globals().H = H
+    lua.execute("""
+        local combo = H.widgets.FolderCombo
+        local clear = combo.Clear
+        H.clears = 0
+        function combo:Clear() H.clears = H.clears + 1 return clear(self) end
+    """)
+    for _ in range(5):
+        H.fire("FolderCombo", "CurrentIndexChanged")
+    assert H.clears == 0
+    assert conf_value(direct, "output_dir") == "D:/Renders"
+
+
+def test_cancelling_the_folder_dialog_changes_nothing(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.chosen_dir = None
+    H.set_combo("FolderCombo", 1)
+    assert conf_value(direct, "output_dir") == ""
+    assert H.widgets["FolderCombo"].CurrentIndex == 0
+
+
+def test_resolves_folder_can_be_chosen_again(lua, direct):
+    conf = direct / "Installer" / "Eternal2x.conf"
+    conf.write_text(conf.read_text() + "output_dir=D:/Renders\n")
+    H = load(lua, ui_script(direct))
+    H.set_combo("FolderCombo", 0)
+    assert conf_value(direct, "output_dir") == ""
+    assert H.combo_items("FolderCombo") == "Resolve's folder,Choose a folder..."
+    H.click("SmoothBtn")
+    assert "--output-dir" not in H.last_command()
 
 
 def test_every_render_plays_at_a_third_of_the_speed(lua, direct):

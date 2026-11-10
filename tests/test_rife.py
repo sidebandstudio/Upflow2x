@@ -259,15 +259,20 @@ class _FakeSession:
     def get_inputs(self):
         return [type("Input", (), {"name": "input"})()]
 
-    def run(self, _names, feed):
+    def run(self, names, feed):
         if self.fail_on_gpu_run and "DmlExecutionProvider" in self.providers:
             raise RuntimeError("E_OUTOFMEMORY")
         x = feed["input"]
-        return [x[:, :3]]
+        out = {"output": x[:, :3], "/Add_7_output_0": np.zeros_like(x[:, :4]),
+               "/Sigmoid_output_0": x[:, 6:7]}
+        return [out[name] for name in names or out]
 
 
-def _fake_ort(monkeypatch, **fail):
+def _fake_ort(monkeypatch, tmp_path, **fail):
     made = []
+    # An ONNX model with an empty graph, for the motion outputs to be added to.
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"\x3a\x00")
 
     class Ort:
         ExecutionMode = type("ExecutionMode", (), {"ORT_SEQUENTIAL": 1})
@@ -286,33 +291,33 @@ def _fake_ort(monkeypatch, **fail):
             return session
 
     monkeypatch.setattr(rife, "ensure_runtime", lambda progress=None: Ort)
-    monkeypatch.setattr(rife, "ensure_model", lambda progress=None: "model.onnx")
+    monkeypatch.setattr(rife, "ensure_model", lambda progress=None: model)
     return made
 
 
-def test_the_gpu_is_used_when_it_starts(monkeypatch):
-    made = _fake_ort(monkeypatch)
+def test_the_gpu_is_used_when_it_starts(monkeypatch, tmp_path):
+    made = _fake_ort(monkeypatch, tmp_path)
     net = rife.Rife()
     assert net.on_gpu and made == [["DmlExecutionProvider", "CPUExecutionProvider"]]
 
 
-def test_a_gpu_that_will_not_start_falls_back_to_the_cpu(monkeypatch):
-    made = _fake_ort(monkeypatch, fail_on_gpu_start=True)
+def test_a_gpu_that_will_not_start_falls_back_to_the_cpu(monkeypatch, tmp_path):
+    made = _fake_ort(monkeypatch, tmp_path, fail_on_gpu_start=True)
     net = rife.Rife()
     assert not net.on_gpu and made == [["CPUExecutionProvider"]]
 
 
-def test_a_gpu_that_onnx_runtime_quietly_swaps_for_the_cpu_is_not_taken_for_one(monkeypatch):
+def test_a_gpu_that_onnx_runtime_quietly_swaps_for_the_cpu_is_not_taken_for_one(monkeypatch, tmp_path):
     """ONNX Runtime 1.31 catches a DirectML start-up error and builds a CPU
     session instead, which would then use every core."""
-    made = _fake_ort(monkeypatch, gpu_quietly_on_cpu=True)
+    made = _fake_ort(monkeypatch, tmp_path, gpu_quietly_on_cpu=True)
     net = rife.Rife()
     assert not net.on_gpu and made[-1] == ["CPUExecutionProvider"]
 
 
-def test_a_gpu_that_runs_out_of_memory_finishes_on_the_cpu(monkeypatch):
+def test_a_gpu_that_runs_out_of_memory_finishes_on_the_cpu(monkeypatch, tmp_path):
     """Resolve holds much of the GPU's memory while a render runs."""
-    _fake_ort(monkeypatch, fail_on_gpu_run=True)
+    _fake_ort(monkeypatch, tmp_path, fail_on_gpu_run=True)
     net = rife.Rife()
     a, b = cel(120, 120), cel(150, 116)
     out = net.interpolate_pair(a, b, [0.5])[0]
@@ -321,11 +326,13 @@ def test_a_gpu_that_runs_out_of_memory_finishes_on_the_cpu(monkeypatch):
     assert not net.on_gpu
 
 
-def _net_returning(monkeypatch, output):
-    """A Rife whose session returns `output(x)` for its input tensor."""
-    _fake_ort(monkeypatch)
+def _net_returning(monkeypatch, tmp_path, output):
+    """A Rife whose session returns the frame `output(x)` for its input tensor,
+    and no motion."""
+    _fake_ort(monkeypatch, tmp_path)
     net = rife.Rife()
-    monkeypatch.setattr(net, "_infer", output)
+    monkeypatch.setattr(net, "_infer",
+                        lambda x, names=None: [output(x), np.zeros_like(x[:, :4]), x[:, 6:7]])
     return net
 
 
@@ -334,18 +341,72 @@ def _net_returning(monkeypatch, output):
     lambda x: np.full_like(x[:, :3], np.nan),             # not numbers
     lambda x: x[:, :3, :, :, None],                       # wrong rank
 ])
-def test_a_broken_frame_from_the_model_stops_the_render(monkeypatch, broken):
+def test_a_broken_frame_from_the_model_stops_the_render(monkeypatch, tmp_path, broken):
     """Written as it came, a smaller frame made a video short by a frame,
     and a frame of NaN came out black, both reported as a full render."""
-    net = _net_returning(monkeypatch, broken)
+    net = _net_returning(monkeypatch, tmp_path, broken)
     with pytest.raises(rife.AIUnavailable, match="broken frame"):
         net.interpolate_pair(cel(120, 120), cel(150, 116), [0.5])
 
 
-def test_a_good_frame_from_the_model_is_used(monkeypatch):
-    net = _net_returning(monkeypatch, lambda x: x[:, :3])
+def test_a_good_frame_from_the_model_is_used(monkeypatch, tmp_path):
+    net = _net_returning(monkeypatch, tmp_path, lambda x: x[:, :3])
     out = net.interpolate_pair(cel(120, 120), cel(150, 116), [0.5])[0]
     assert np.array_equal(out, cel(120, 120))
+
+
+def test_at_2x_an_in_between_only_brings_back_the_motion(monkeypatch, tmp_path):
+    """Its 1x frame is never used, and copying it back from the GPU took time.
+    A halfway frame is given to the network again, so it comes back whole."""
+    _fake_ort(monkeypatch, tmp_path)
+    net = rife.Rife()
+    asked, run = [], net.session.run
+    net.session.run = lambda names, feed: asked.append(names) or run(names, feed)
+    a, b = cel(120, 120), cel(150, 116)
+    big = tuple(np.repeat(np.repeat(f, 2, 0), 2, 1) for f in (a, b))
+    out = net.interpolate_pair(a, b, [0.1, 0.5], big=big)
+    motion = list(rife._MOTION)
+    assert asked == [None, None, motion, motion]
+    assert all(f.shape == big[0].shape for f in out)
+
+
+def test_the_motion_is_added_to_the_models_outputs():
+    """vs-mlrt's export keeps the network's motion inside the model."""
+    graph = b"\x0a\x00"                      # one empty node
+    model = b"\x08\x07\x3a\x02" + graph + b"\x42\x00"
+    added = b"\x62\x03\x0a\x01m"             # an output named m
+    assert rife._with_outputs(model, ["m"]) == b"\x08\x07\x3a\x07" + graph + added + b"\x42\x00"
+
+
+def test_a_model_without_a_graph_is_refused():
+    with pytest.raises(rife.AIUnavailable, match="Delete it"):
+        rife._with_outputs(b"\x08\x07", ["m"])
+
+
+def test_in_a_pool_the_2x_in_betweens_are_the_same_frames():
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    import cv2
+
+    from tests.fake_rife import StandInRife
+    a, b = cel(80, 120), cel(110, 120)
+    big = tuple(cv2.resize(f, None, fx=2, fy=2) for f in (a, b))
+    times = [0.0, 0.05, 0.1, 0.4, 0.9, 1.0]
+    plain = StandInRife().interpolate_pair(a, b, times, big=big)
+    with ThreadPoolExecutor(2) as pool:
+        drawn = StandInRife().interpolate_pair(a, b, times, big=big, pool=pool)
+        assert isinstance(drawn[1], Future)
+        drawn = [f.result() if isinstance(f, Future) else f for f in drawn]
+    assert all(np.array_equal(x, y) for x, y in zip(plain, drawn))
+
+
+def test_at_2x_a_cut_holds_the_first_drawing_as_given():
+    from tests.fake_rife import StandInRife
+    a, b = cel(140, 120), city()
+    big = np.full((480, 640, 3), 10, np.uint8), np.full((480, 640, 3), 20, np.uint8)
+    out = StandInRife().interpolate_pair(a, b, [0.0, 0.5, 1.0], big=big)
+    assert [int(f[0, 0, 0]) for f in out] == [10, 10, 20]
+    assert all(f is not big[0] and f is not big[1] for f in out)
 
 
 def test_a_frame_of_another_size_never_reaches_the_file(monkeypatch, make_anime, tmp_path):
@@ -526,3 +587,19 @@ def test_the_network_holds_across_a_cut(model):
     a, b = cel(140, 120), city()
     out = model.interpolate_pair(a, b, [0.25, 0.5, 0.75])
     assert all(np.array_equal(f, a) for f in out)
+
+
+@pytest.mark.parametrize("dx,t", [(30, 0.5), (120, 0.5), (60, 0.1)])
+def test_at_2x_the_in_between_is_the_networks_frame_drawn_bigger(model, dx, t):
+    """Drawn from the drawings at 2x with the network's motion, it came within
+    40 to 45 dB of upscaling the network's own frame, near a drawing too."""
+    import cv2
+
+    def up(frame):
+        return cv2.resize(frame, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+    a, b = cel(80, 120), cel(80 + dx, 120)
+    small = model.interpolate_pair(a, b, [t])[0]
+    big = model.interpolate_pair(a, b, [t], big=(up(a), up(b)))[0]
+    assert big.shape == (2 * a.shape[0], 2 * a.shape[1], 3)
+    assert cv2.PSNR(big, up(small)) > 38

@@ -152,6 +152,22 @@ def test_the_site_only_promises_files_the_release_ships(repo_root, name):
         )
 
 
+def test_primary_downloads_are_standalone_setup_and_manual_steps_are_separate(repo_root):
+    from Installer.build_release import INSTALLERS
+
+    download = page(repo_root, "download.html")
+    assert set(re.findall(r'data-asset="([^"]+)"', download)) == set(INSTALLERS)
+    home = page(repo_root, "index.html")
+    assert set(re.findall(r'data-asset="([^"]+)"', home)) == set(INSTALLERS)
+    help_text = page(repo_root, "help.html")
+    for section in ("windows", "macos"):
+        instructions = re.search(r'<section id="' + section + r'".*?</section>', help_text, re.S).group()
+        assert "click Install" in instructions
+        assert "gui_installer.py" not in instructions
+        assert "to PATH" not in instructions
+    assert 'id="manual"' in help_text
+
+
 class Form(HTMLParser):
     def __init__(self) -> None:
         super().__init__()

@@ -388,6 +388,11 @@ function H.make_resolve(clip_file_path)
     local project = {
         GetCurrentTimeline = function(_self) return timeline end,
         GetMediaPool = function(_self) return pool end,
+        GetName = function(_self) return H.project_name or "Untitled Project" end,
+        GetSetting = function(_self, key)
+            if key == "perfCacheClipsLocation" then return H.cache_location end
+            return nil
+        end,
     }
     local pm = { GetCurrentProject = function(_self) return project end }
     return { GetProjectManager = function(_self) return pm end }
@@ -432,7 +437,11 @@ function H.load(script_path, clip_file_path)
     H.prints = {}
     H.window = nil
 
-    _G.fu = { UIManager = ui }
+    -- Fusion's folder dialog hands back H.chosen_dir, or nothing for Cancel.
+    _G.fu = { UIManager = ui, RequestDir = function(_self, start)
+        H.dir_dialog_start = start or ""
+        return H.chosen_dir
+    end }
     _G.bmd = bmd
 
     -- Resolve hands Lua scripts a Resolve() global, as in Blackmagic's

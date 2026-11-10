@@ -14,6 +14,11 @@ end
 
 local function trim_trailing_sep(path)
     if not path then return "" end
+    -- A drive or the disk's root keeps its separator. D: alone means the
+    -- folder that drive was last in, and / trimmed is nothing at all.
+    if path:match("^%a:[/\\]+$") or path:match("^[/\\]+$") then
+        return path:sub(1, path:match("^%a:") and 3 or 1)
+    end
     local out = path:gsub("[/\\]+$", "")
     return out
 end
@@ -52,7 +57,10 @@ end
 local function shell_quote(s)
     if not s then return "" end
     if is_windows() then
-        return '"' .. s:gsub('"', '""') .. '"'
+        -- A backslash before the closing quote escapes it, so a folder like
+        -- D:\Cache\ ran on into the next argument. Doubled, it stays one.
+        local body = s:gsub('"', '""'):gsub("(\\+)$", "%1%1")
+        return '"' .. body .. '"'
     end
     -- Single quotes, so $, backticks and backslashes in a path stay literal.
     -- Inside double quotes the shell would expand `$HOME` in a file name, or
@@ -934,10 +942,18 @@ local TIPS = {
     upscale = "Draw every frame at 2x with Real-ESRGAN's anime model, on the GPU on Windows. Without a GPU, Resolve's Super Scale does it.\nIt shows on a timeline bigger than the clip.",
     interp = "Draw the missing in-betweens with the RIFE network, on the GPU on Windows. Its first use downloads about 50 MB.\nThe render plays at a third of the clip's speed, ready to time remap.\nOff keeps every drawing on its frame and the clip's length, and draws nothing, to upscale only.",
     format = "Image sequence is lossless and imports most reliably. MP4 is one small file but lossy, and MKV is one lossless file. All are 8-bit RGB.",
+    -- The same list as Installer/install_upflow2x.py's REQUIREMENTS.
+    needs = "Upflow2x needs:\n"
+        .. "DaVinci Resolve Studio 18 or newer. The free edition blocks script panels.\n"
+        .. "Windows 10 or 11, or macOS 12 or newer.\n"
+        .. "A DirectX 12 GPU on Windows draws and upscales. Without one, and on a Mac, "
+        .. "the in-betweens run on the CPU and Super Scale upscales.\n"
+        .. "An internet connection for setup and the first render, which downloads about 50 MB.",
+    folder = "Where renders are saved, a folder for each project. By default that's an Upflow2x folder beside the project's Resolve cache, or Resolve's own folder. Choose a folder to keep them somewhere else, like a drive with more space.",
 }
 
-local function info(tip)
-    return ui:Label{ Text = "i", ToolTip = tip, StyleSheet = INFO, Weight = 0,
+local function info(tip, id)
+    return ui:Label{ ID = id, Text = "i", ToolTip = tip, StyleSheet = INFO, Weight = 0,
                      Alignment = { AlignCenter = true },
                      MinimumSize = { 16, 16 }, MaximumSize = { 16, 16 } }
 end
@@ -971,6 +987,7 @@ local win = disp:AddWindow({
         ui:Label{ ID = "SubTitle", Text = "v" .. CURRENT_VERSION, StyleSheet = VERSION, Weight = 0,
                   Alignment = { AlignRight = true, AlignVCenter = true } },
         ui:Button{ ID = "UpdateBtn", Text = "Check for Updates", StyleSheet = LINK, Weight = 0 },
+        info(TIPS.needs, "NeedsInfo"),
     },
 
     ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = CARD,
@@ -995,6 +1012,7 @@ local win = disp:AddWindow({
                    Checked = DO_INTERPOLATE, StyleSheet = TOGGLE, ToolTip = TIPS.interp },
     },
     row("Output", ui:ComboBox{ ID = "FormatCombo", Weight = 0.8 }, TIPS.format),
+    row("Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.8 }, TIPS.folder),
     ui:Button{ ID = "SmoothBtn", Text = RENDER_LABEL, StyleSheet = START, ToolTip = TIPS.render,
                MinimumSize = { 0, 44 }, MaximumSize = { 16777215, 44 } },
 
@@ -1025,6 +1043,22 @@ local items = win:GetItems()
 
 for _, label in ipairs(FORMAT_LABELS) do items.FormatCombo:AddItem(label) end
 items.FormatCombo.CurrentIndex = index_of(FORMATS, FORMAT)
+
+-- Save to: Resolve's folder, the folder chosen last, and a way to choose one.
+-- Refilling it changes the selection, which is not a choice.
+local FILLING_FOLDERS = false
+local function fill_folders()
+    FILLING_FOLDERS = true
+    items.FolderCombo:Clear()
+    items.FolderCombo:AddItem("Resolve's folder")
+    if OUTPUT_DIR ~= "" then items.FolderCombo:AddItem(short_path(OUTPUT_DIR, 30)) end
+    items.FolderCombo:AddItem("Choose a folder...")
+    items.FolderCombo.CurrentIndex = OUTPUT_DIR ~= "" and 1 or 0
+    items.FolderCombo.ToolTip = OUTPUT_DIR ~= "" and OUTPUT_DIR
+        or "Beside the project's Resolve cache, or in Resolve's own folder."
+    FILLING_FOLDERS = false
+end
+fill_folders()
 
 -- ---------------------------------------------------------------------------
 -- state
@@ -1207,6 +1241,20 @@ local function mark_drawings(clip, marks)
     return placed, shared
 end
 
+-- The open project's name and Resolve's cache folder, which decide where the
+-- stage puts a render. Either can be missing, and the stage then falls back.
+local function render_folder_hints()
+    local name, cache = "", ""
+    pcall(function()
+        local project = get_resolve():GetProjectManager():GetCurrentProject()
+        local got = project:GetName()
+        if type(got) == "string" then name = got end
+        got = project:GetSetting("perfCacheClipsLocation")
+        if type(got) == "string" then cache = got end
+    end)
+    return name, cache
+end
+
 local function current_args(extra)
     local args = ""
     if SOURCE_PATH and SOURCE_PATH ~= "" then
@@ -1237,7 +1285,16 @@ local function current_args(extra)
         -- Each step doubles or halves how big a change counts, around the default.
         args = args .. " --threshold " .. string.format("%.6f", 0.004 * 2 ^ ((THRESHOLD - 5) / 2)):gsub(",", ".")
     end
-    if OUTPUT_DIR ~= "" then args = args .. " --output-dir " .. shell_quote(OUTPUT_DIR) end
+    -- Renders go in a folder per project: in the folder chosen under Save to,
+    -- or in one Upflow2x folder beside Resolve's cache, rather than among the
+    -- clips they came from.
+    local project, cache = render_folder_hints()
+    if project ~= "" then args = args .. " --project " .. shell_quote(project) end
+    if OUTPUT_DIR ~= "" then
+        args = args .. " --output-dir " .. shell_quote(OUTPUT_DIR)
+    elseif cache ~= "" then
+        args = args .. " --cache-dir " .. shell_quote(cache)
+    end
     args = args .. " --status-file " .. shell_quote(STATUS_PATH)
     return args .. (extra or "")
 end
@@ -1914,6 +1971,30 @@ end
 function win.On.FormatCombo.CurrentIndexChanged(ev)
     FORMAT = FORMATS[(items.FormatCombo.CurrentIndex or 0) + 1] or "png"
     save_conf()
+end
+
+function win.On.FolderCombo.CurrentIndexChanged(ev)
+    if FILLING_FOLDERS then return end
+    local index = items.FolderCombo.CurrentIndex or 0
+    -- Showing the folder already in use is no choice. Resolve may deliver
+    -- the refill's own events after it, and refilling for them would loop.
+    if index == (OUTPUT_DIR ~= "" and 1 or 0) then return end
+    if index == 0 then
+        OUTPUT_DIR = ""
+    elseif index == (OUTPUT_DIR ~= "" and 2 or 1) then
+        -- Fusion's folder dialog, which Resolve's scripts share. Cancelled,
+        -- it hands back nothing and the folder stays as it was.
+        local ok, chosen = pcall(function()
+            return global("fu"):RequestDir(OUTPUT_DIR ~= "" and OUTPUT_DIR or nil)
+        end)
+        if ok and type(chosen) == "string" and chosen ~= "" then
+            OUTPUT_DIR = trim_trailing_sep(chosen)
+        elseif not ok then
+            set_status("Resolve could not open a folder dialog here.")
+        end
+    end
+    save_conf()
+    fill_folders()
 end
 
 function win.On.UpscaleCB.Clicked(ev)

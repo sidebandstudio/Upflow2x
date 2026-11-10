@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from Pipeline.interpolate import CUT_THRESHOLD, frames_are_a_cut, upscale
-from tests.fake_rife import StandInRife
+from tests.fake_rife import StandInRife, still
 
 interpolate_pair = StandInRife().interpolate_pair
 
@@ -71,12 +71,12 @@ class SnappingRife(StandInRife):
         super().__init__()
         self.asked = []
 
-    def _run(self, a, b, t):
+    def _run(self, a, b, t, frame=True):
         self.asked.append(t)
         if t <= 0.1:
-            return a.copy()
+            return a.copy(), still(a, 0.0)
         if t >= 0.9:
-            return b.copy()
+            return b.copy(), still(b, 1.0)
         return super()._run(a, b, t)
 
 

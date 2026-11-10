@@ -28,6 +28,10 @@ def built(tmp_path, monkeypatch, repo_root):
     for name in ("VERSION", "README.md", "requirements.txt"):
         (tmp_path / name).write_bytes((repo_root / name).read_bytes())
 
+    (tmp_path / "dist").mkdir()
+    for name in builder.INSTALLERS:
+        (tmp_path / "dist" / name).write_bytes(b"standalone installer")
+
     monkeypatch.setattr(builder, "REPO_ROOT", tmp_path)
     return tmp_path
 
@@ -202,6 +206,28 @@ def test_publish_never_replaces_files_on_an_existing_release(built, monkeypatch)
     uploads = calls[1:]
     assert uploads and all(c[:3] == ["gh", "release", "upload"] for c in uploads)
     assert not any("--clobber" in c for c in uploads)
+    for name in builder.INSTALLERS:
+        assert any(c[-1].endswith(name) for c in uploads)
+
+
+def test_publish_refuses_to_ship_without_standalone_setup(built, monkeypatch):
+    (built / "dist" / builder.INSTALLERS[0]).unlink()
+    monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k:
+                        pytest.fail("published an incomplete release"))
+    assert builder.publish("0.5.1") is False
+
+
+def test_published_setup_must_match_the_built_installer(built, monkeypatch):
+    import io
+    import urllib.request
+
+    def download(url, **kwargs):
+        return io.BytesIO((built / "dist" / url.rsplit("/", 1)[1]).read_bytes())
+
+    monkeypatch.setattr(urllib.request, "urlopen", download)
+    assert builder.verify_installers("0.5.1")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"wrong installer"))
+    assert not builder.verify_installers("0.5.1")
 
 
 def test_verify_reports_an_unreachable_download(built, capsys):
