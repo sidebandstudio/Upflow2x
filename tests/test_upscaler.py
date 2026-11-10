@@ -201,6 +201,16 @@ def test_the_network_and_lanczos_never_both_scale(twice_as_big, monkeypatch, mak
     assert _render(make_anime, tmp_path / "b", network_upscale=True).width == 200
 
 
+def test_only_the_drawings_are_upscaled(twice_as_big, make_anime, tmp_path, read_frames):
+    """Upscaling every in-between too took most of a render's time. They are
+    drawn at 2x from the drawings instead."""
+    result = _render(make_anime, tmp_path, network_upscale=True, upscale_enabled=False)
+    frames = read_frames(result.output)
+    assert twice_as_big.drawn == 6 and len(frames) == 12
+    between = cv2.addWeighted(frames[0], 0.5, frames[2], 0.5, 0)
+    assert int(cv2.absdiff(frames[1], between).max()) <= 1
+
+
 def test_a_held_drawing_is_drawn_at_2x_once(twice_as_big, make_anime, tmp_path, read_frames):
     """With Interpolate off, a drawing on 2s comes through twice. The network
     drew it twice, so an upscale-only render took twice as long."""

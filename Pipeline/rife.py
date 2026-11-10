@@ -52,6 +52,14 @@ _EVEN_FROM = 0.25
 # A millionth of a gap: closer to a drawing than any real frame can be.
 _ROUNDING = 1e-6
 
+# The network draws an in-between by moving each drawing's pixels and mixing
+# the two. These are the inner values it does that with: how far each pixel
+# comes from in each drawing, and how much of each drawing it takes. Applied
+# to the drawings at 2x, they draw the in-between at 2x, so the upscaler only
+# has to draw the drawings. vs-mlrt's export keeps them inside the model, so
+# they are added to its outputs when it loads.
+_MOTION = ("/Add_7_output_0", "/Sigmoid_output_0")
+
 ProgressFn = Callable[[str, float], None]
 
 
@@ -178,6 +186,86 @@ def ensure_model(progress: Optional[ProgressFn] = None, path: Path = MODEL_PATH,
         part.unlink(missing_ok=True)
 
 
+def _varint(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        low, n = n & 0x7F, n >> 7
+        out.append(low | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _read_varint(data: bytes, i: int):
+    n = shift = 0
+    while True:
+        b = data[i]
+        i += 1
+        n |= (b & 0x7F) << shift
+        shift += 7
+        if not b & 0x80:
+            return n, i
+
+
+def _with_outputs(model: bytes, names) -> bytes:
+    """An ONNX model with inner values `names` added to its outputs.
+
+    The file is a protobuf ModelProto, and a field written again is added to a
+    repeated one, so each name goes on the end of the graph's outputs without
+    the onnx package. Its type is left for ONNX Runtime to work out.
+    """
+    i = 0
+    while i < len(model):
+        start = i
+        key, i = _read_varint(model, i)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            _, i = _read_varint(model, i)
+        elif wire == 1:
+            i += 8
+        elif wire == 5:
+            i += 4
+        elif wire == 2:
+            n, j = _read_varint(model, i)
+            if field == 7:  # ModelProto.graph
+                graph = model[j:j + n]
+                for name in names:
+                    info = b"\x0a" + _varint(len(name)) + name.encode()  # ValueInfoProto.name
+                    graph += b"\x62" + _varint(len(info)) + info         # GraphProto.output
+                return model[:start] + b"\x3a" + _varint(len(graph)) + graph + model[j + n:]
+            i = j + n
+        else:
+            break
+    raise AIUnavailable("The AI model file is not one Upflow2x can read. Delete it and "
+                        "render again to download it fresh.")
+
+
+# The pixel positions of a frame, for each size drawn at.
+_GRIDS: dict = {}
+
+
+def _warp2x(big0: np.ndarray, big1: np.ndarray, flow: np.ndarray,
+            mask: np.ndarray) -> np.ndarray:
+    """The in-between at 2x, from the drawings at 2x and the network's motion.
+
+    It moves and mixes the pixels as the network does, with the motion
+    stretched to the larger size. On Hero's walk this came within 46 dB of
+    upscaling the network's own frame, near drawings too, where an in-between
+    is drawn from a halfway frame and was moved twice.
+    """
+    h, w = big0.shape[:2]
+    if (h, w) not in _GRIDS:
+        x, y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+        _GRIDS[(h, w)] = np.dstack([x, y])
+    grid = _GRIDS[(h, w)]
+    moved = []
+    for frame, dx, dy in ((big0, flow[0], flow[1]), (big1, flow[2], flow[3])):
+        part = cv2.resize(cv2.merge([dx, dy]), (w, h), interpolation=cv2.INTER_LINEAR)
+        moved.append(cv2.remap(frame, cv2.scaleAdd(part, 2.0, grid), None, cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_REPLICATE))
+    weight = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR)
+    return cv2.blendLinear(moved[0], moved[1], weight, 1.0 - weight)
+
+
 class Rife:
     """One loaded model, reused for every pair of drawings in a render."""
 
@@ -186,11 +274,14 @@ class Rife:
     # at a time, so they are kept until the next pair.
     _pair = None
     _known = None
+    # The last two frames given to the network and the input made from them.
+    # The next in-between of the same two only needs its time changed.
+    _input = None
 
     def __init__(self, progress: Optional[ProgressFn] = None):
         ort = ensure_runtime(progress)
         model = ensure_model(progress)
-        self._ort, self._model = ort, model
+        self._ort, self._model = ort, _with_outputs(Path(model).read_bytes(), _MOTION)
         # DirectML runs it on any Windows GPU, AMD included, when the
         # onnxruntime-directml package is the one installed.
         self.on_gpu = "DmlExecutionProvider" in ort.get_available_providers()
@@ -222,11 +313,11 @@ class Rife:
             # One core left over, so Resolve stays responsive while it works.
             options.intra_op_num_threads = max(1, (os.cpu_count() or 2) - 1)
             providers = ["CPUExecutionProvider"]
-        return ort.InferenceSession(str(self._model), options, providers=providers)
+        return ort.InferenceSession(self._model, options, providers=providers)
 
-    def _infer(self, x: np.ndarray) -> np.ndarray:
+    def _infer(self, x: np.ndarray) -> list:
         try:
-            return self.session.run(None, {self.input: x})[0]
+            return self.session.run(None, {self.input: x})
         except Exception:  # onnxruntime raises its own exception types
             if not self.on_gpu:
                 raise
@@ -234,30 +325,42 @@ class Rife:
             # more than is left. The CPU is slower but has room.
             self.on_gpu = False
             self.session = self._session()
-            return self.session.run(None, {self.input: x})[0]
+            return self.session.run(None, {self.input: x})
 
-    def _run(self, a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+    def _run(self, a: np.ndarray, b: np.ndarray, t: float):
+        """The network's frame at t, and the motion it drew it with: for each
+        pixel, how far it comes from in a and in b (4 x h x w), and how much
+        of a it takes (h x w)."""
         h, w = a.shape[:2]
         ph, pw = -h % _PAD, -w % _PAD
-        planes = []
-        for frame in (a, b):
-            padded = cv2.copyMakeBorder(frame, 0, ph, 0, pw, cv2.BORDER_REPLICATE)
-            rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
-            planes.append(rgb.astype(np.float32).transpose(2, 0, 1) / 255.0)
-        planes.append(np.full((1, h + ph, w + pw), t, np.float32))
-        y = self._infer(np.concatenate(planes)[None])
+        if self._input is None or self._input[0] is not a or self._input[1] is not b:
+            x = np.empty((1, 7, h + ph, w + pw), np.float32)
+            for k, frame in enumerate((a, b)):
+                padded = cv2.copyMakeBorder(frame, 0, ph, 0, pw, cv2.BORDER_REPLICATE)
+                for c in range(3):
+                    # RGB from 0 to 1, from OpenCV's BGR from 0 to 255.
+                    cv2.multiply(cv2.extractChannel(padded, 2 - c), 1.0 / 255.0,
+                                 dst=x[0, 3 * k + c], dtype=cv2.CV_32F)
+            self._input = (a, b, x)
+        x = self._input[2]
+        x[0, 6] = t
+        y = self._infer(x)
         # A frame of another size would be written as it came, and a video
         # writer drops it without a word, so the render would come out short.
-        expected = (1, 3, h + ph, w + pw)
-        if getattr(y, "shape", None) != expected or not np.isfinite(y).all():
+        expected = [(1, c, h + ph, w + pw) for c in (3, 4, 1)]
+        shapes = [getattr(part, "shape", None) for part in y]
+        if shapes != expected or not all(np.isfinite(part).all() for part in y):
             raise AIUnavailable(f"The AI model returned a broken frame (shape "
-                                f"{getattr(y, 'shape', '?')}, expected {expected}), so the "
-                                f"render was stopped.")
-        rgb = np.clip(y[0, :, :h, :w].transpose(1, 2, 0) * 255.0 + 0.5, 0, 255)
-        return cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2BGR)
+                                f"{shapes[0] if shapes else '?'}, expected {expected[0]}), so "
+                                f"the render was stopped.")
+        # Rounded and held to 0..255 as it goes back to 8 bits.
+        frame = cv2.merge([cv2.multiply(y[0][0, c, :h, :w], 255.0, dtype=cv2.CV_8U)
+                           for c in (2, 1, 0)])
+        return frame, (y[1][0, :, :h, :w], y[2][0, 0, :h, :w])
 
     def interpolate_pair(self, a: np.ndarray, b: np.ndarray, times: List[float],
-                         unrelated: Optional[bool] = None) -> List[np.ndarray]:
+                         unrelated: Optional[bool] = None,
+                         big: Optional[tuple] = None) -> List[np.ndarray]:
         """In-betweens for `times` (each in 0..1) between drawings a and b.
 
         t == 0 returns `a` untouched and t == 1 returns `b` untouched, so real
@@ -267,32 +370,47 @@ class Rife:
         the pair is two shots, made with the pairs around it in view, or False
         where the editor's markers already said. Without it the pair is judged
         on its own.
+
+        With `big`, a and b upscaled 2x, every frame comes back at 2x: the
+        drawings as given, and each in-between drawn from them with the
+        network's motion. Upscaling the in-betweens one by one instead took
+        most of a render's time.
         """
         if not times:
             return []
+        ends = big or (a, b)
         if np.array_equal(a, b):
-            return [a.copy() for _ in times]
+            return [ends[0].copy() for _ in times]
         if unrelated is None:
             unrelated = frames_are_a_cut(a, b) or frames_are_unrelated(a, b)
         if unrelated:
-            return [(a.copy() if t < 1.0 else b.copy()) for t in times]
+            return [(ends[0].copy() if t < 1.0 else ends[1].copy()) for t in times]
         out: List[np.ndarray] = []
         for t in times:
             t = float(min(1.0, max(0.0, t)))
             # This close to a drawing is rounding in the time map, not a frame.
             if t <= _ROUNDING:
-                out.append(a.copy())
+                out.append(ends[0].copy())
             elif t >= 1.0 - _ROUNDING:
-                out.append(b.copy())
+                out.append(ends[1].copy())
             else:
-                out.append(self._between(a, b, t))
+                out.append(self._between(a, b, t, big))
         return out
 
-    def _between(self, a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+    def _step(self, lo: tuple, hi: tuple, t: float) -> tuple:
+        """The frame at t between two (frame, 2x frame) pairs, as another."""
+        frame, (flow, mask) = self._run(lo[0], hi[0], t)
+        return frame, (None if lo[1] is None else _warp2x(lo[1], hi[1], flow, mask))
+
+    def _between(self, a: np.ndarray, b: np.ndarray, t: float,
+                 big: Optional[tuple] = None) -> np.ndarray:
         """The frame at t between a and b, asking the network only for 0.25 to 0.75."""
-        if self._pair is None or self._pair[0] is not a or self._pair[1] is not b:
-            self._pair, self._known = (a, b), {0.0: a, 1.0: b}
+        ends = big or (None, None)
+        pair = (a, b, ends[0])
+        if self._pair is None or any(x is not y for x, y in zip(self._pair, pair)):
+            self._pair, self._known = pair, {0.0: (a, ends[0]), 1.0: (b, ends[1])}
         known = self._known
+        which = 0 if big is None else 1
         lo, hi = 0.0, 1.0
         while True:
             local = (t - lo) / (hi - lo)
@@ -300,11 +418,11 @@ class Rife:
             # distance from the nearer end. A gap of 5000 frames slowed three
             # times needs 12 halvings and keeps 23 halfway frames.
             if _EVEN_FROM <= local <= 1.0 - _EVEN_FROM:
-                return self._run(known[lo], known[hi], local)
+                return self._step(known[lo], known[hi], local)[which]
             if hi - lo < 2.0 ** -30:
                 # Only rounding gets here, where both ends are one picture.
-                return (known[lo] if local < 0.5 else known[hi]).copy()
+                return (known[lo] if local < 0.5 else known[hi])[which].copy()
             mid = (lo + hi) / 2.0
             if mid not in known:
-                known[mid] = self._run(known[lo], known[hi], 0.5)
+                known[mid] = self._step(known[lo], known[hi], 0.5)
             lo, hi = (lo, mid) if local < 0.5 else (mid, hi)

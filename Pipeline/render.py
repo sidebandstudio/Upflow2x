@@ -488,27 +488,38 @@ def render_plan(
                               "has space and the folder is writable.") from exc
 
     state = {"writer": None, "written": 0, "width": 0, "height": 0, "upscaler": upscaler,
-             "upscale_note": upscale_note, "last_in": None, "last_out": None}
+             "upscale_note": upscale_note}
+    # The last two frames upscaled and their 2x versions: the pair of drawings
+    # being drawn between, or a held drawing.
+    drawn: Deque[Tuple[np.ndarray, np.ndarray]] = deque(maxlen=2)
 
-    def emit(frame: np.ndarray) -> None:
-        """Upscale if asked, then write one output frame."""
-        if state["upscaler"] is not None:
-            # A held drawing comes through once for every frame it is held,
-            # and the network would draw the same picture again each time.
-            if state["last_in"] is not None and np.array_equal(frame, state["last_in"]):
-                frame = state["last_out"]
-            else:
-                try:
-                    big = state["upscaler"].upscale(frame)
-                except AIUnavailable as exc:
-                    # Past the first frame, the frames so far are 2x and the rest
-                    # cannot be left at 1x, so the render stops and says why.
-                    if state["written"]:
-                        raise
-                    state["upscaler"], state["upscale_note"] = None, str(exc)
-                else:
-                    state["last_in"], state["last_out"] = frame, big
-                    frame = big
+    def upscaled(frame: np.ndarray) -> Optional[np.ndarray]:
+        """`frame` at 2x, or None where the network does not run."""
+        if state["upscaler"] is None:
+            return None
+        # A drawing is in two pairs, and a held one comes through once for
+        # every frame it is held. The network would draw it again each time.
+        for given, big in drawn:
+            if given is frame or np.array_equal(given, frame):
+                return big
+        try:
+            big = state["upscaler"].upscale(frame)
+        except AIUnavailable as exc:
+            # Past the first frame, the frames so far are 2x and the rest
+            # cannot be left at 1x, so the render stops and says why.
+            if state["written"]:
+                raise
+            state["upscaler"], state["upscale_note"] = None, str(exc)
+            return None
+        drawn.append((frame, big))
+        return big
+
+    def emit(frame: np.ndarray, is_2x: bool = False) -> None:
+        """Upscale if asked and not done, then write one output frame."""
+        if not is_2x:
+            big = upscaled(frame)
+            if big is not None:
+                frame = big
         if factor > 1:
             frame = upscale(frame, factor)
         if state["written"] and frame.shape[:2] != (state["height"], state["width"]):
@@ -600,14 +611,19 @@ def render_plan(
             # 30 GB before the first was written.
             for at in range(0, len(times), BATCH):
                 part = times[at:at + BATCH]
+                big = None
                 if pair is not None:
-                    produced = pair(prev, curr, part, unrelated=unrelated)
+                    # Only the drawings are upscaled. The in-betweens are drawn
+                    # at 2x from them.
+                    big = upscaled(prev), upscaled(curr)
+                    big = None if big[0] is None or big[1] is None else big
+                    produced = pair(prev, curr, part, unrelated=unrelated, big=big)
                 else:
                     # De-duplicate only: every output frame is a real drawing,
                     # nothing is synthesised, and each starts where it did.
                     produced = [(prev if t < 1.0 else curr).copy() for t in part]
                 for frame in produced:
-                    emit(frame)
+                    emit(frame, is_2x=big is not None)
             if moves:
                 before, here = here, after
             window.popleft()
