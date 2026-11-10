@@ -182,7 +182,9 @@ Resolve's own folder instead, again a folder for each project:
 `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows, or
 `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on
 a Mac. Show in Folder opens it. Up to v0.5.0 each render was saved beside its
-clip, and those stay where they are.
+clip, and those stay where they are. A render you stop, or one that fails, is
+deleted, since it never goes into Resolve. A finished one is never deleted,
+because your timeline uses it.
 
 A 4K image sequence takes about 6 MB a frame, so a few seconds of footage can
 fill a gigabyte. Upflow2x never deletes a render, so delete a project's
