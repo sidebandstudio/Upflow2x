@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -140,6 +141,40 @@ def test_a_project_named_like_a_device_still_gets_a_folder(tmp_path, project, fo
                               cache=str(tmp_path / "CacheClip"))
     out.mkdir()
     assert out.parent == tmp_path / "Upflow2x" / folder and out.is_dir()
+
+
+def test_another_spelling_of_a_onedrive_cache_is_still_onedrive(monkeypatch, tmp_path):
+    """A .. in the path, or a short 8.3 name, hid that it was in OneDrive."""
+    onedrive = tmp_path / "OneDrive"
+    (onedrive / "Videos").mkdir(parents=True)
+    (tmp_path / "Other").mkdir()
+    monkeypatch.setenv("OneDrive", str(onedrive))
+    folder = resolves_folder(tmp_path / "user-home") / "Upflow2x" / "Show"
+    dotted = os.path.join(str(tmp_path), "Other", "..", "OneDrive", "Videos", "CacheClip")
+    assert smooth.default_output_dir("Show", dotted) == folder
+    if sys.platform.startswith("win"):
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        ctypes.windll.kernel32.GetShortPathNameW(str(onedrive / "Videos"), buf, 1024)
+        if buf.value and buf.value.lower() != str(onedrive / "Videos").lower():
+            assert smooth.default_output_dir("Show", buf.value + "\\CacheClip") == folder
+
+
+def test_a_folder_that_refuses_files_leaves_renders_in_resolves_own_folder(monkeypatch, tmp_path):
+    """mkdir succeeds on a folder that is already there, whatever it allows."""
+    beside = tmp_path / "work" / "Upflow2x" / "Show"
+    beside.mkdir(parents=True)
+    real = smooth.tempfile.TemporaryFile
+
+    def refuse(*args, dir=None, **kwargs):
+        if dir is not None and Path(dir) == beside:
+            raise PermissionError("Access is denied")
+        return real(*args, dir=dir, **kwargs)
+
+    monkeypatch.setattr(smooth.tempfile, "TemporaryFile", refuse)
+    out = smooth._output_path(tmp_path / "clip.avi", None, "png", project="Show",
+                              cache=str(tmp_path / "work" / "CacheClip"))
+    assert out.parent == resolves_folder(tmp_path / "user-home") / "Upflow2x" / "Show"
 
 
 def test_a_cache_on_a_missing_drive_leaves_renders_in_resolves_own_folder(tmp_path):
