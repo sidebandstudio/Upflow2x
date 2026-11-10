@@ -186,6 +186,12 @@ clip, and those stay where they are. A render you stop, or one that fails, is
 deleted, since it never goes into Resolve. A finished one is never deleted,
 because your timeline uses it.
 
+To keep renders somewhere else, like a drive with more space, open **Save to**
+under Output and pick **Choose a folder...**. Renders then go there, still a
+folder for each project, until you pick **Resolve's folder** again. If that
+folder can't be written to, for example because its drive is unplugged, the
+render stops and says so.
+
 A 4K image sequence takes about 6 MB a frame, so a few seconds of footage can
 fill a gigabyte. Upflow2x never deletes a render, so delete a project's
 folder once its renders are off your timelines.

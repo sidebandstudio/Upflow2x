@@ -944,6 +944,7 @@ local TIPS = {
         .. "A DirectX 12 GPU on Windows draws and upscales. Without one, and on a Mac, "
         .. "the in-betweens run on the CPU and Super Scale upscales.\n"
         .. "An internet connection for setup and the first render, which downloads about 50 MB.",
+    folder = "Where renders are saved, a folder for each project. By default that's an Upflow2x folder beside the project's Resolve cache, or Resolve's own folder. Choose a folder to keep them somewhere else, like a drive with more space.",
 }
 
 local function info(tip, id)
@@ -1006,6 +1007,7 @@ local win = disp:AddWindow({
                    Checked = DO_INTERPOLATE, StyleSheet = TOGGLE, ToolTip = TIPS.interp },
     },
     row("Output", ui:ComboBox{ ID = "FormatCombo", Weight = 0.8 }, TIPS.format),
+    row("Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.8 }, TIPS.folder),
     ui:Button{ ID = "SmoothBtn", Text = RENDER_LABEL, StyleSheet = START, ToolTip = TIPS.render,
                MinimumSize = { 0, 44 }, MaximumSize = { 16777215, 44 } },
 
@@ -1036,6 +1038,22 @@ local items = win:GetItems()
 
 for _, label in ipairs(FORMAT_LABELS) do items.FormatCombo:AddItem(label) end
 items.FormatCombo.CurrentIndex = index_of(FORMATS, FORMAT)
+
+-- Save to: Resolve's folder, the folder chosen last, and a way to choose one.
+-- Refilling it changes the selection, which is not a choice.
+local FILLING_FOLDERS = false
+local function fill_folders()
+    FILLING_FOLDERS = true
+    items.FolderCombo:Clear()
+    items.FolderCombo:AddItem("Resolve's folder")
+    if OUTPUT_DIR ~= "" then items.FolderCombo:AddItem(short_path(OUTPUT_DIR, 30)) end
+    items.FolderCombo:AddItem("Choose a folder...")
+    items.FolderCombo.CurrentIndex = OUTPUT_DIR ~= "" and 1 or 0
+    items.FolderCombo.ToolTip = OUTPUT_DIR ~= "" and OUTPUT_DIR
+        or "Beside the project's Resolve cache, or in Resolve's own folder."
+    FILLING_FOLDERS = false
+end
+fill_folders()
 
 -- ---------------------------------------------------------------------------
 -- state
@@ -1262,14 +1280,15 @@ local function current_args(extra)
         -- Each step doubles or halves how big a change counts, around the default.
         args = args .. " --threshold " .. string.format("%.6f", 0.004 * 2 ^ ((THRESHOLD - 5) / 2)):gsub(",", ".")
     end
+    -- Renders go in a folder per project: in the folder chosen under Save to,
+    -- or in one Upflow2x folder beside Resolve's cache, rather than among the
+    -- clips they came from.
+    local project, cache = render_folder_hints()
+    if project ~= "" then args = args .. " --project " .. shell_quote(project) end
     if OUTPUT_DIR ~= "" then
         args = args .. " --output-dir " .. shell_quote(OUTPUT_DIR)
-    else
-        -- Renders go in one Upflow2x folder beside Resolve's cache, a folder
-        -- per project, rather than among the clips they came from.
-        local project, cache = render_folder_hints()
-        if project ~= "" then args = args .. " --project " .. shell_quote(project) end
-        if cache ~= "" then args = args .. " --cache-dir " .. shell_quote(cache) end
+    elseif cache ~= "" then
+        args = args .. " --cache-dir " .. shell_quote(cache)
     end
     args = args .. " --status-file " .. shell_quote(STATUS_PATH)
     return args .. (extra or "")
@@ -1947,6 +1966,27 @@ end
 function win.On.FormatCombo.CurrentIndexChanged(ev)
     FORMAT = FORMATS[(items.FormatCombo.CurrentIndex or 0) + 1] or "png"
     save_conf()
+end
+
+function win.On.FolderCombo.CurrentIndexChanged(ev)
+    if FILLING_FOLDERS then return end
+    local index = items.FolderCombo.CurrentIndex or 0
+    if index == 0 then
+        OUTPUT_DIR = ""
+    elseif index == (OUTPUT_DIR ~= "" and 2 or 1) then
+        -- Fusion's folder dialog, which Resolve's scripts share. Cancelled,
+        -- it hands back nothing and the folder stays as it was.
+        local ok, chosen = pcall(function()
+            return global("fu"):RequestDir(OUTPUT_DIR ~= "" and OUTPUT_DIR or nil)
+        end)
+        if ok and type(chosen) == "string" and chosen ~= "" then
+            OUTPUT_DIR = trim_trailing_sep(chosen)
+        elseif not ok then
+            set_status("Resolve could not open a folder dialog here.")
+        end
+    end
+    save_conf()
+    fill_folders()
 end
 
 function win.On.UpscaleCB.Clicked(ev)

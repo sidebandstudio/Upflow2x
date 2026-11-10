@@ -193,10 +193,62 @@ def test_an_output_folder_in_the_settings_wins(lua, direct):
     conf = direct / "Installer" / "Eternal2x.conf"
     conf.write_text(conf.read_text() + "output_dir=/renders\n")
     H = load(lua, ui_script(direct))
-    H.cache_location = "D:/Cache/CacheClip"
+    H.project_name, H.cache_location = "Show", "D:/Cache/CacheClip"
     H.click("SmoothBtn")
     cmd = H.last_command()
-    assert "--output-dir" in cmd and "--cache-dir" not in cmd and "--project" not in cmd
+    assert "--output-dir" in cmd and "--cache-dir" not in cmd
+    assert "--project" in cmd, "a chosen folder gets a folder per project too"
+    assert H.combo_items("FolderCombo") == "Resolve's folder,/renders,Choose a folder..."
+    assert H.widgets["FolderCombo"].CurrentIndex == 1
+
+
+def conf_value(root, key):
+    for line in (root / "Installer" / "Eternal2x.conf").read_text().splitlines():
+        if line.startswith(key + "="):
+            return line.split("=", 1)[1]
+    return None
+
+
+def test_renders_save_to_resolves_folder_until_another_is_chosen(lua, direct):
+    H = load(lua, ui_script(direct))
+    assert H.combo_items("FolderCombo") == "Resolve's folder,Choose a folder..."
+    assert H.widgets["FolderCombo"].CurrentIndex == 0
+
+
+def test_a_folder_chosen_under_save_to_is_used_and_kept(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.chosen_dir = "D:/Renders/"
+    H.set_combo("FolderCombo", 1)
+    assert conf_value(direct, "output_dir") == "D:/Renders"
+    assert H.combo_items("FolderCombo") == "Resolve's folder,D:/Renders,Choose a folder..."
+    assert H.widgets["FolderCombo"].CurrentIndex == 1
+    H.click("SmoothBtn")
+    assert "--output-dir" in H.last_command()
+    # Opened again, the dialog starts from it, and choosing nothing keeps it.
+    H.chosen_dir = None
+    H.set_combo("FolderCombo", 2)
+    assert H.dir_dialog_start == "D:/Renders"
+    assert conf_value(direct, "output_dir") == "D:/Renders"
+    assert H.widgets["FolderCombo"].CurrentIndex == 1
+
+
+def test_cancelling_the_folder_dialog_changes_nothing(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.chosen_dir = None
+    H.set_combo("FolderCombo", 1)
+    assert conf_value(direct, "output_dir") == ""
+    assert H.widgets["FolderCombo"].CurrentIndex == 0
+
+
+def test_resolves_folder_can_be_chosen_again(lua, direct):
+    conf = direct / "Installer" / "Eternal2x.conf"
+    conf.write_text(conf.read_text() + "output_dir=D:/Renders\n")
+    H = load(lua, ui_script(direct))
+    H.set_combo("FolderCombo", 0)
+    assert conf_value(direct, "output_dir") == ""
+    assert H.combo_items("FolderCombo") == "Resolve's folder,Choose a folder..."
+    H.click("SmoothBtn")
+    assert "--output-dir" not in H.last_command()
 
 
 def test_every_render_plays_at_a_third_of_the_speed(lua, direct):

@@ -631,6 +631,26 @@ def test_a_delete_that_fails_still_reports_the_stop(make_anime, monkeypatch, tmp
     assert json.loads(status.read_text())["message"] == "Stopped."
 
 
+def test_a_chosen_folder_gets_a_folder_per_project_too(tmp_path):
+    out = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "chosen"), "png",
+                              project="Show", cache=str(tmp_path / "work" / "CacheClip"))
+    assert out.parent == tmp_path / "chosen" / "Show"
+
+
+def test_a_chosen_folder_that_cannot_be_written_says_so(make_anime, monkeypatch, tmp_path,
+                                                         capsys):
+    """Its drive can be unplugged. Saving somewhere else unasked would lose
+    track of the render."""
+    src = make_anime(holds=(2,) * 6)
+    blocker = tmp_path / "drive"
+    blocker.write_text("a file where the drive would be")
+    status = tmp_path / "status.json"
+    assert run(monkeypatch, ["--video", str(src), "--status-file", str(status),
+                             "--output-dir", str(blocker / "Renders")]) == 2
+    message = json.loads(status.read_text())["message"]
+    assert "cannot save renders in" in message and "Save to" in message
+
+
 def test_two_renders_of_one_clip_never_share_a_folder(tmp_path):
     """One that failed would delete the other's finished render."""
     first = smooth._output_path(tmp_path / "clip.avi", str(tmp_path / "o"), "png")
