@@ -41,7 +41,7 @@ holds for three times its length.
 - Draws the in-between frames that were never drawn with the RIFE network,
   run on your own machine, on the GPU on Windows wherever DirectML loads. Moving characters stay in
   one piece.
-- Makes no in-between by warping pixels, which doubles lines and smears fast
+- Never falls back to plain optical flow, which doubles lines and smears fast
   characters on drawn animation. Where the network cannot run, the drawings
   are kept as drawn.
 - Keeps deliberate held poses still, instead of smearing them into drift.
@@ -50,9 +50,10 @@ holds for three times its length.
   shots it snaps instead. A cut right beside another cut or very fast motion
   can still blend for a frame, so check montages. On a marked clip it checks
   nothing and draws every gap, so mark the last frame before a cut as well.
-- Upscales 2x with Real-ESRGAN's anime model, on the GPU on Windows. It clears
-  compression blocks and keeps thin lines crisp, where Super Scale enlarges
-  the blocks. Without a GPU, Resolve's Super Scale does the upscale.
+- Upscales each drawing 2x with Real-ESRGAN's anime model, on the GPU on
+  Windows, then draws the in-betweens at 2x from the upscaled drawings. It
+  clears compression blocks and keeps thin lines crisp, where Super Scale
+  enlarges the blocks. Without a GPU, Resolve's Super Scale does the upscale.
 
 It does a job like Twixtor's, but finds the held drawings first, so it only
 generates the frames that were never drawn. It draws them with a network
@@ -168,6 +169,19 @@ Then:
   original to line up with.
 - **Show in Folder** opens the render's location.
 
+Renders go in an `Upflow2x` folder beside the project's cache folder, with a
+folder for each project. The cache folder is the Cache files location in
+Project Settings → Master Settings → Working Folders. With the cache in
+`D:\Resolve\CacheClip`, a project called Episode 1 renders to
+`D:\Resolve\Upflow2x\Episode 1`. If the project has no cache folder, or its
+drive is unplugged, renders go in `Videos\Upflow2x` on Windows or
+`Movies/Upflow2x` on a Mac, again a folder for each project. Up to v0.5.0
+each render was saved beside its clip, and those stay where they are.
+
+A 4K image sequence takes about 6 MB a frame, so a few seconds of footage can
+fill a gigabyte. Upflow2x never deletes a render, so delete a project's
+folder once its renders are off your timelines.
+
 Only the part of the file the timeline clip uses is analysed and rebuilt. To
 reach it, the file is still decoded from its start, once for Analyse and again
 for the render, so a short cut late in a long episode shows Seeking for a
@@ -183,8 +197,8 @@ pointer on one to see what it does.
 |---|---|
 | **Threshold** | How big a change Analyse counts as a new drawing, 1 to 9. Lower catches small moves, like only a mouth or a slow drift. Higher counts only big ones, like the whole shot moving. It does nothing to frames you have marked. |
 | **Output** | `Image sequence` is lossless and the most reliable to import. `MP4` is a single compact file but lossy. `MKV` is a lossless single file. All three are 8-bit RGB: transparency and 10-bit colour in the source are not kept. MP4 and MKV need an even width and height. |
-| **Upscaling** | Draws every frame at 2x with Real-ESRGAN's anime video model, on the GPU through DirectML, about 0.14 s a 1080p frame on a Radeon. The model ships with Upflow2x. Without a GPU, on a Mac for one, Resolve's Super Scale is applied to the imported clip instead. Either way it only shows on a timeline bigger than the clip, such as 3840x2160 for 1080p footage. A 2x render has four times the pixels. As an image sequence, a 4K frame of anime is about 6 to 7 MB, four to five times its 1080p size. |
-| **Interpolate** | On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, about 0.13 s an in-between at 2K on a Radeon, and falls back to the CPU, about ten times slower. If its Python already has ONNX Runtime without DirectML, that one is used, on the CPU. Its first run installs ONNX Runtime and downloads the model, about 50 MB, so it needs a connection once; without one, every drawing is kept as drawn and the panel says why. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off skips the in-betweens, so every drawing comes back on its original frame and the render keeps the clip's length. With Upscaling on, that only upscales. |
+| **Upscaling** | Upscales each drawing 2x with Real-ESRGAN's anime video model, on the GPU through DirectML. The in-betweens are then drawn at 2x from the upscaled drawings, so the model runs once a drawing rather than once a frame. The model ships with Upflow2x. Without a GPU, on a Mac for one, Resolve's Super Scale is applied to the imported clip instead. Either way it only shows on a timeline bigger than the clip, such as 3840x2160 for 1080p footage. A 2x render has four times the pixels. As an image sequence, a 4K frame of anime is about 6 MB, four to five times its 1080p size. |
+| **Interpolate** | On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, and falls back to the CPU, about ten times slower. If its Python already has ONNX Runtime without DirectML, that one is used, on the CPU. Its first run installs ONNX Runtime and downloads the model, about 50 MB, so it needs a connection once; without one, every drawing is kept as drawn and the panel says why. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off skips the in-betweens, so every drawing comes back on its original frame and the render keeps the clip's length. With Upscaling on, that only upscales. |
 
 Settings are remembered between sessions.
 
@@ -212,11 +226,12 @@ python -m Stages.resolve_smooth --video shot.mov --base-hold 3 --no-interpolate
 python -m Stages.resolve_smooth --video grainy.mov --grain
 ```
 
-`--video` skips Resolve entirely and writes the result to an `Upflow2x` folder
-beside the source, or to `--output-dir`. Add `--network-upscale` and, where
-Real-ESRGAN runs on a GPU, the render is 2x. Without it, or without a GPU, the
-2x upscale is Resolve's Super Scale, applied when the panel imports the result,
-so a `--video` run stays at source resolution.
+`--video` skips Resolve entirely and writes the result to `Videos/Upflow2x`,
+`Movies/Upflow2x` on a Mac, or to `--output-dir`. `--project` and
+`--cache-dir` pick the folder the way the panel does. Add `--network-upscale`
+and, where Real-ESRGAN runs on a GPU, the render is 2x. Without it, or without
+a GPU, the 2x upscale is Resolve's Super Scale, applied when the panel imports
+the result, so a `--video` run stays at source resolution.
 
 Add `--json` and stdout carries a single JSON summary, errors included, while
 progress goes to stderr.
@@ -240,6 +255,7 @@ afterwards.
 | "No duplicate frames. This clip is already on 1s." | The clip has no duplicated frames. It is live action, or already on 1s. |
 | "Every frame differs, but the differences look like grain" | Mark the drawings with M, then press **Render**. From the command line, `--grain` raises the threshold above the grain. |
 | "...has a variable frame rate" | Render the clip to a constant frame rate first, from Resolve or with ffmpeg, as the message says. |
+| Rendering is slow | The time grows with the length of the clip on your timeline, and only the part it uses is rebuilt, so trimming helps. On a Radeon RX 7900 XT, under three seconds of 1080p, upscaled and slowed to 190 frames at 4K, takes about 33 seconds. Without a GPU the in-betweens are drawn on the CPU, about ten times slower, and Super Scale upscales. |
 | Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel says so and shows its last error. If a run was interrupted, press **Reset**. |
 | Resolve would not import the render | The render still finished. The panel prints where it is, so drag it into your media pool. Switching Output to `Image sequence` usually avoids this. |
 | Upscale skipped | Without a GPU the upscale is Super Scale, which needs Resolve Studio. |
@@ -251,7 +267,7 @@ afterwards.
 ./test.sh
 ```
 
-360+ tests, no Resolve required. The suite fakes the Resolve scripting API and
+800+ tests, no Resolve required. The suite fakes the Resolve scripting API and
 runs the Lua panel under an embedded Lua runtime, so buttons, commands and the
 full render pipeline are all covered headlessly. See `tests/README.md`.
 
@@ -265,7 +281,7 @@ the environment variables from Blackmagic's scripting README, then run
 To cut a release, bump `VERSION` and push a matching tag:
 
 ```
-git tag v0.5.0 && git push origin v0.5.0
+git tag v0.5.1 && git push origin v0.5.1
 ```
 
 The release workflow builds the archives, publishes them, checks the published

@@ -142,7 +142,7 @@
                     </li>
                     <li>
                         <h3>Compare</h3>
-                        <p><strong>Show Original</strong> switches the smoothed clip off so the original shows through, and Show Upflow2x switches it back. It only works on an upscale with Interpolate off, since a slowed render has no original to line up with. <strong>Show in Folder</strong> opens where the render was saved.</p>
+                        <p><strong>Show Original</strong> switches the smoothed clip off so the original shows through, and Show Upflow2x switches it back. It only works on an upscale with Interpolate off, since a slowed render has no original to line up with. <strong>Show in Folder</strong> opens where the render was saved, as <a href="#folder">Where renders go</a> explains.</p>
                     </li>
                 </ol>
             </section>
@@ -153,8 +153,8 @@
                 <dl class="settings">
                     <div><dt>Threshold</dt><dd>How big a change Analyse counts as a new drawing, 1 to 9. Lower catches small moves, like only a mouth or a slow drift. Higher counts only big ones, like the whole shot moving. It does nothing to frames you've marked.</dd></div>
                     <div><dt>Output</dt><dd><code>Image sequence</code> is lossless and imports most reliably. <code>MP4</code> is one compact file but lossy. <code>MKV</code> is one lossless file. All three are 8-bit RGB, so transparency and 10-bit colour aren't kept. MP4 and MKV need an even width and height.</dd></div>
-                    <div><dt>Upscaling</dt><dd>Draws every frame at 2x with Real-ESRGAN's anime video model, on the GPU through DirectML, about 0.14 s a 1080p frame on a Radeon. The model comes with Upflow2x. Without a GPU, on a Mac for one, Resolve's Super Scale is applied to the imported clip instead. Either way it only shows on a timeline bigger than the clip, such as 3840x2160 for 1080p footage. As an image sequence, a 4K frame is about 6 to 7 MB.</dd></div>
-                    <div><dt>Interpolate</dt><dd>On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, about 0.13 s an in-between at 2K on a Radeon, and falls back to the CPU, which is about ten times slower. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off, every drawing comes back on its own frame with nothing new drawn, at the clip's length. With Upscaling on, that only upscales.</dd></div>
+                    <div><dt>Upscaling</dt><dd>Upscales each drawing 2x with Real-ESRGAN's anime video model, on the GPU through DirectML, then draws the in-betweens at 2x from the upscaled drawings, so the model runs once a drawing rather than once a frame. The model comes with Upflow2x. Without a GPU, on a Mac for one, Resolve's Super Scale is applied to the imported clip instead. Either way it only shows on a timeline bigger than the clip, such as 3840x2160 for 1080p footage. As an image sequence, a 4K frame is about 6 MB.</dd></div>
+                    <div><dt>Interpolate</dt><dd>On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, and falls back to the CPU, which is about ten times slower. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off, every drawing comes back on its own frame with nothing new drawn, at the clip's length. With Upscaling on, that only upscales.</dd></div>
                 </dl>
             </section>
 
@@ -164,6 +164,10 @@
                 <p>A drawing held on purpose keeps its full length instead of drifting. Only the timing between drawings is smoothed.</p>
                 <h3>Cuts stay hard</h3>
                 <p>On a clip with no markers, where two drawings look like different shots, Upflow2x snaps instead of blending, which would show both shots at once. A cut right beside another cut or very fast motion can still blend for a frame, so check montages. On a marked clip it checks nothing and draws every gap between two markers, so mark the last frame before a cut as well.</p>
+                <h3 id="folder">Where renders go</h3>
+                <p>Renders go in an <code>Upflow2x</code> folder beside your project's cache folder, with a folder for each project. The cache folder is the Cache files location in Project Settings, Master Settings, Working Folders. With the cache in <code>D:\Resolve\CacheClip</code>, a project called Episode 1 renders to <code>D:\Resolve\Upflow2x\Episode 1</code>.</p>
+                <p>If the project has no cache folder, or its drive is unplugged, renders go in <code>Videos\Upflow2x</code> on Windows or <code>Movies/Upflow2x</code> on a Mac, again a folder for each project. Up to v0.5.0 each render was saved beside its clip, and those stay where they are.</p>
+                <p>A 4K image sequence takes about 6 MB a frame, so a few seconds of footage can fill a gigabyte. Upflow2x never deletes a render. Delete a project's folder once its renders are off your timelines.</p>
                 <h3>Nothing was smoothed</h3>
                 <p>The first render installs the network's runtime and downloads its model, so it needs a connection once. Without one, every drawing is kept as drawn rather than filled in some other way, since warping pixels doubles lines on drawn animation. The status says why. Render again once you're online.</p>
             </section>
@@ -216,7 +220,7 @@
                         <summary>Rendering is slow on long clips</summary>
                         <div class="answer">
                             <p>Every frame is read and every missing in-between drawn, so the time grows with the length of the clip on your timeline. Only the part of the file the clip uses is rebuilt, so trimming helps, though a cut late in a long file is still decoded up to its start first, shown as Seeking.</p>
-                            <p>On Windows the in-betweens are drawn on the GPU, and ten seconds of 1080p takes roughly ten to twenty seconds. On the CPU it's about ten times slower. Upscaling on the GPU adds about 0.3 to 0.5 s a frame, much of it writing the 4K images. Resolve stays usable the whole time.</p>
+                            <p>On Windows both networks run on the GPU. On a Radeon RX 7900 XT, under three seconds of 1080p, upscaled and slowed to 190 frames at 4K, takes about 33 seconds. Without a GPU the in-betweens are drawn on the CPU, about ten times slower, and Super Scale upscales. Resolve stays usable the whole time.</p>
                         </div>
                     </details>
                     <details>
