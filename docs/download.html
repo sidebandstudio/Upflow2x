@@ -119,9 +119,9 @@
                 <table>
                     <thead><tr><th scope="col">Version</th><th scope="col">Released</th><th scope="col">Windows</th><th scope="col">macOS</th></tr></thead>
                     <!-- Written in, so the list still shows when GitHub's API is rate
-                         limited. The script adds newer ones above it. -->
+                         limited. When the API answers, the script redraws it. -->
                     <tbody id="older-rows">
-                        <tr data-tag="v0.5.0"><td>0.5.0</td><td class="when">Oct 31, 2026</td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-win.zip">Windows zip</a></td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-mac.zip">macOS zip</a></td></tr>
+                        <tr><td>0.5.0</td><td class="when">Oct 31, 2026</td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-win.zip">Windows zip</a></td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-mac.zip">macOS zip</a></td></tr>
                     </tbody>
                     <!-- Taken down 2026-11-15: these came before RIFE and the upscaler.
                          Their releases are drafts on GitHub, so the zips are gone. -->
@@ -210,12 +210,12 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
             link.lastChild.nodeValue = ' ' + url.split('/').pop() + ' ';
         });
 
+        // The API's list replaces the written-in rows, so a release taken
+        // down later loses its row along with its downloads.
         var rows = document.getElementById('older-rows');
-        var at = 0;
+        rows.textContent = '';
         published.slice(1).forEach(function (release) {
-            // A version written into the page already has its row.
-            if (rows.querySelector('[data-tag="' + release.tag_name + '"]')) return;
-            var row = rows.insertRow(at++);
+            var row = rows.insertRow();
             row.insertCell().textContent = release.tag_name.replace(/^v/, '');
             var when = row.insertCell();
             when.textContent = released(release);
