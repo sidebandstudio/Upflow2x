@@ -510,6 +510,8 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -.025em; }
 .older td:first-child { font-weight: 600; }
 .older .when { color: var(--mute); }
 .older a { color: var(--soft); }
+.older .retired th { color: var(--amber); border-top: 1px solid var(--line); }
+.older .retired td { opacity: .35; }
 
 /* help */
 

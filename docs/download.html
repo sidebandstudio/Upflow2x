@@ -19,7 +19,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/site.css?v=20261027o">
+    <link rel="stylesheet" href="css/site.css?v=20261115a">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -115,13 +115,24 @@
                 <h2 id="older-title">Older versions</h2>
                 <p id="release-state">Loading the release list from GitHub.</p>
             </div>
-            <div class="older" id="older-list" hidden>
+            <div class="older">
                 <table>
                     <thead><tr><th scope="col">Version</th><th scope="col">Released</th><th scope="col">Windows</th><th scope="col">macOS</th></tr></thead>
                     <tbody id="older-rows"></tbody>
+                    <!-- Taken down 2026-11-15: these came before RIFE and the upscaler.
+                         Their releases are drafts on GitHub, so the zips are gone. -->
+                    <tbody class="retired">
+                        <tr><th scope="rowgroup" colspan="4">Outdated · no longer available</th></tr>
+                        <tr><td>0.4.0</td><td class="when">Oct 26, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.3.1</td><td class="when">Aug 31, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.3.0</td><td class="when">Aug 31, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.2.0</td><td class="when">Apr 1, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.1.2</td><td class="when">Feb 23, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.1.1</td><td class="when">Feb 23, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                    </tbody>
                 </table>
             </div>
-            <p class="note">All of them, with notes, are on <a href="https://github.com/sidebandstudio/Upflow2x/releases">GitHub</a>.</p>
+            <p class="note">Versions before 0.5.0 have no AI in-betweens or upscale, so they're no longer offered. Notes for the rest are on <a href="https://github.com/sidebandstudio/Upflow2x/releases">GitHub</a>.</p>
         </section>
     </div>
 
@@ -198,7 +209,7 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
         });
 
         var older = published.slice(1);
-        if (!older.length) { state.textContent = 'This is the first release.'; return; }
+        if (!older.length) { state.textContent = 'Only the newest version is available.'; return; }
         state.textContent = 'Kept here in case you need to go back.';
         var rows = document.getElementById('older-rows');
         older.forEach(function (release) {
@@ -210,7 +221,6 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
             cell(row, assetUrl(release, 'upflow2x-win.zip'), 'Windows zip');
             cell(row, assetUrl(release, 'upflow2x-mac.zip'), 'macOS zip');
         });
-        document.getElementById('older-list').hidden = false;
     })
     .catch(function () {
         // The API is down or rate limited. The buttons above still work, and
