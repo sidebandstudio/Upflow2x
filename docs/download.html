@@ -19,7 +19,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/site.css?v=20261027o">
+    <link rel="stylesheet" href="css/site.css?v=20261115a">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -113,15 +113,29 @@
         <section class="section" id="older" aria-labelledby="older-title">
             <div class="section-head">
                 <h2 id="older-title">Older versions</h2>
-                <p id="release-state">Loading the release list from GitHub.</p>
             </div>
-            <div class="older" id="older-list" hidden>
+            <div class="older">
                 <table>
                     <thead><tr><th scope="col">Version</th><th scope="col">Released</th><th scope="col">Windows</th><th scope="col">macOS</th></tr></thead>
-                    <tbody id="older-rows"></tbody>
+                    <!-- Written in, so the list still shows when GitHub's API is rate
+                         limited. When the API answers, the script redraws it. -->
+                    <tbody id="older-rows">
+                        <tr><td>0.5.0</td><td class="when">Oct 31, 2026</td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-win.zip">Windows zip</a></td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-mac.zip">macOS zip</a></td></tr>
+                    </tbody>
+                    <!-- Taken down 2026-11-15: these came before RIFE and the upscaler.
+                         Their releases are drafts on GitHub, so the zips are gone. -->
+                    <tbody class="retired">
+                        <tr><th scope="rowgroup" colspan="4">Outdated · no longer available</th></tr>
+                        <tr><td>0.4.0</td><td class="when">Oct 26, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.3.1</td><td class="when">Aug 31, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.3.0</td><td class="when">Aug 31, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.2.0</td><td class="when">Apr 1, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.1.2</td><td class="when">Feb 23, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                        <tr><td>0.1.1</td><td class="when">Feb 23, 2026</td><td>Windows zip</td><td>macOS zip</td></tr>
+                    </tbody>
                 </table>
             </div>
-            <p class="note">All of them, with notes, are on <a href="https://github.com/sidebandstudio/Upflow2x/releases">GitHub</a>.</p>
+            <p class="note">Versions before 0.5.0 have no AI in-betweens or upscale, so they're no longer offered. Notes for the rest are on <a href="https://github.com/sidebandstudio/Upflow2x/releases">GitHub</a>.</p>
         </section>
     </div>
 
@@ -171,8 +185,6 @@ function cell(row, url, label) {
     td.appendChild(a);
 }
 
-var state = document.getElementById('release-state');
-
 fetch('https://api.github.com/repos/' + REPO + '/releases')
     .then(function (res) {
         // A rate-limited API answers with an error object, not a list.
@@ -181,7 +193,7 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
     })
     .then(function (releases) {
         var published = releases.filter(function (r) { return !r.draft && !r.prerelease; });
-        if (!published.length) { state.textContent = 'No releases yet.'; return; }
+        if (!published.length) return;
 
         var latest = published[0];
         var version = latest.tag_name.replace(/^v/, '');
@@ -197,11 +209,11 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
             link.lastChild.nodeValue = ' ' + url.split('/').pop() + ' ';
         });
 
-        var older = published.slice(1);
-        if (!older.length) { state.textContent = 'This is the first release.'; return; }
-        state.textContent = 'Kept here in case you need to go back.';
+        // The API's list replaces the written-in rows, so a release taken
+        // down later loses its row along with its downloads.
         var rows = document.getElementById('older-rows');
-        older.forEach(function (release) {
+        rows.textContent = '';
+        published.slice(1).forEach(function (release) {
             var row = rows.insertRow();
             row.insertCell().textContent = release.tag_name.replace(/^v/, '');
             var when = row.insertCell();
@@ -210,12 +222,11 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
             cell(row, assetUrl(release, 'upflow2x-win.zip'), 'Windows zip');
             cell(row, assetUrl(release, 'upflow2x-mac.zip'), 'macOS zip');
         });
-        document.getElementById('older-list').hidden = false;
     })
     .catch(function () {
-        // The API is down or rate limited. The buttons above still work, and
-        // the update feed, which has no such limit, still names the version.
-        state.textContent = 'Could not load the list from GitHub. The buttons above still get the newest version.';
+        // The API is down or rate limited. The buttons above still open the
+        // newest release, the written-in rows stay, and the update feed, which
+        // has no such limit, still names the version.
         return fetch('https://raw.githubusercontent.com/' + REPO + '/main/update/latest.json')
             .then(function (res) {
                 if (!res.ok) throw new Error('feed returned ' + res.status);
