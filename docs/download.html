@@ -113,12 +113,16 @@
         <section class="section" id="older" aria-labelledby="older-title">
             <div class="section-head">
                 <h2 id="older-title">Older versions</h2>
-                <p id="release-state">Loading the release list from GitHub.</p>
+                <p>Kept here in case you need to go back.</p>
             </div>
             <div class="older">
                 <table>
                     <thead><tr><th scope="col">Version</th><th scope="col">Released</th><th scope="col">Windows</th><th scope="col">macOS</th></tr></thead>
-                    <tbody id="older-rows"></tbody>
+                    <!-- Written in, so the list still shows when GitHub's API is rate
+                         limited. The script adds newer ones above it. -->
+                    <tbody id="older-rows">
+                        <tr data-tag="v0.5.0"><td>0.5.0</td><td class="when">Oct 31, 2026</td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-win.zip">Windows zip</a></td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-mac.zip">macOS zip</a></td></tr>
+                    </tbody>
                     <!-- Taken down 2026-11-15: these came before RIFE and the upscaler.
                          Their releases are drafts on GitHub, so the zips are gone. -->
                     <tbody class="retired">
@@ -182,8 +186,6 @@ function cell(row, url, label) {
     td.appendChild(a);
 }
 
-var state = document.getElementById('release-state');
-
 fetch('https://api.github.com/repos/' + REPO + '/releases')
     .then(function (res) {
         // A rate-limited API answers with an error object, not a list.
@@ -192,7 +194,7 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
     })
     .then(function (releases) {
         var published = releases.filter(function (r) { return !r.draft && !r.prerelease; });
-        if (!published.length) { state.textContent = 'No releases yet.'; return; }
+        if (!published.length) return;
 
         var latest = published[0];
         var version = latest.tag_name.replace(/^v/, '');
@@ -208,12 +210,12 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
             link.lastChild.nodeValue = ' ' + url.split('/').pop() + ' ';
         });
 
-        var older = published.slice(1);
-        if (!older.length) { state.textContent = 'Only the newest version is available.'; return; }
-        state.textContent = 'Kept here in case you need to go back.';
         var rows = document.getElementById('older-rows');
-        older.forEach(function (release) {
-            var row = rows.insertRow();
+        var at = 0;
+        published.slice(1).forEach(function (release) {
+            // A version written into the page already has its row.
+            if (rows.querySelector('[data-tag="' + release.tag_name + '"]')) return;
+            var row = rows.insertRow(at++);
             row.insertCell().textContent = release.tag_name.replace(/^v/, '');
             var when = row.insertCell();
             when.textContent = released(release);
@@ -223,9 +225,9 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
         });
     })
     .catch(function () {
-        // The API is down or rate limited. The buttons above still work, and
-        // the update feed, which has no such limit, still names the version.
-        state.textContent = 'Could not load the list from GitHub. The buttons above still get the newest version.';
+        // The API is down or rate limited. The buttons above still open the
+        // newest release, the written-in rows stay, and the update feed, which
+        // has no such limit, still names the version.
         return fetch('https://raw.githubusercontent.com/' + REPO + '/main/update/latest.json')
             .then(function (res) {
                 if (!res.ok) throw new Error('feed returned ' + res.status);
