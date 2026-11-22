@@ -612,6 +612,40 @@ def test_a_downloaded_python_unpacks(tmp_path, tar_python):
     assert (tmp_path / "python" / "bin" / "python3").read_bytes() == b"payload"
 
 
+@pytest.mark.parametrize("platform,ships_file,trusted", [
+    ("darwin", True, True), ("darwin", False, False), ("linux", True, False),
+], ids=["mac", "mac without the file", "not a mac"])
+def test_downloads_on_a_mac_trust_the_certificates_macos_ships(tmp_path, monkeypatch,
+                                                               platform, ships_file,
+                                                               trusted):
+    """The Mac app is frozen from python.org's Python, which finds no
+    certificates on a Mac without that Python installed, so downloading
+    Python failed with CERTIFICATE_VERIFY_FAILED."""
+    import importlib
+    import ssl
+    import urllib.response
+    gui = importlib.import_module("Installer.gui_installer")
+    assert gui.MAC_CA_FILE == "/private/etc/ssl/cert.pem"
+    ca_file = tmp_path / "cert.pem"
+    if ships_file:
+        ca_file.write_text("")
+    monkeypatch.setattr(gui, "MAC_CA_FILE", str(ca_file))
+    loaded, opened = [], []
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations",
+                        lambda context, cafile: loaded.append((context, cafile)))
+
+    def urlopen(request, timeout, context):
+        # What the context trusts by the time the request goes out.
+        opened.append((context, list(loaded)))
+        return urllib.response.addinfourl(io.BytesIO(b"python"), {}, request.full_url)
+
+    monkeypatch.setattr(gui.urllib.request, "urlopen", urlopen)
+    assert gui._download_with_progress("https://example.com/python.tar.gz") == b"python"
+    context, loaded_before = opened[0]
+    assert loaded_before == ([(context, str(ca_file))] if trusted else [])
+
+
 def test_the_gui_installer_prefers_the_python_running_it(monkeypatch):
     """Running `py Installer/gui_installer.py` works with no python on PATH."""
     import importlib
