@@ -14,6 +14,7 @@ import io
 import os
 import platform
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -57,6 +58,12 @@ PYTHON_MAC_X86_URL = f"{_PBS_BASE}/cpython-{PYTHON_VERSION}+{_PBS_TAG}-x86_64-ap
 PYTHON_LINUX_URL = f"{_PBS_BASE}/cpython-{PYTHON_VERSION}+{_PBS_TAG}-x86_64-unknown-linux-gnu-install_only.tar.gz"
 
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
+
+# The Mac app is frozen from python.org's Python, whose OpenSSL looks for
+# certificates in a folder only that Python's own "Install Certificates" step
+# fills. Without them every download failed with CERTIFICATE_VERIFY_FAILED.
+# Every Mac ships this file, and the Python downloaded above trusts it too.
+MAC_CA_FILE = "/private/etc/ssl/cert.pem"
 
 DEFAULT_UPDATE_URL = (
     "https://raw.githubusercontent.com/"
@@ -212,7 +219,10 @@ def _get_python_download_url() -> str | None:
 
 def _download_with_progress(url: str, callback=None) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Upflow2x-Installer/1.0"})
-    resp = urllib.request.urlopen(req, timeout=120)
+    context = ssl.create_default_context()
+    if sys.platform == "darwin":
+        context.load_verify_locations(MAC_CA_FILE)
+    resp = urllib.request.urlopen(req, timeout=120, context=context)
     total = int(resp.headers.get("Content-Length", 0))
     data = io.BytesIO()
     downloaded = 0

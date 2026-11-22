@@ -612,6 +612,31 @@ def test_a_downloaded_python_unpacks(tmp_path, tar_python):
     assert (tmp_path / "python" / "bin" / "python3").read_bytes() == b"payload"
 
 
+@pytest.mark.parametrize("platform,trusted", [("darwin", ["/private/etc/ssl/cert.pem"]),
+                                              ("linux", [])])
+def test_downloads_on_a_mac_trust_the_certificates_macos_ships(monkeypatch, platform,
+                                                               trusted):
+    """The Mac app is frozen from python.org's Python, which finds no
+    certificates on a Mac without that Python installed, so downloading
+    Python failed with CERTIFICATE_VERIFY_FAILED."""
+    import importlib
+    import ssl
+    import urllib.response
+    gui = importlib.import_module("Installer.gui_installer")
+    loaded, opened = [], []
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations",
+                        lambda context, cafile: loaded.append((context, cafile)))
+
+    def urlopen(request, timeout, context):
+        opened.append(context)
+        return urllib.response.addinfourl(io.BytesIO(b"python"), {}, request.full_url)
+
+    monkeypatch.setattr(gui.urllib.request, "urlopen", urlopen)
+    assert gui._download_with_progress("https://example.com/python.tar.gz") == b"python"
+    assert loaded == [(opened[0], cafile) for cafile in trusted]
+
+
 def test_the_gui_installer_prefers_the_python_running_it(monkeypatch):
     """Running `py Installer/gui_installer.py` works with no python on PATH."""
     import importlib
