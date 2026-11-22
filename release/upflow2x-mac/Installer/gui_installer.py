@@ -220,7 +220,7 @@ def _get_python_download_url() -> str | None:
 def _download_with_progress(url: str, callback=None) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Upflow2x-Installer/1.0"})
     context = ssl.create_default_context()
-    if sys.platform == "darwin":
+    if sys.platform == "darwin" and os.path.isfile(MAC_CA_FILE):
         context.load_verify_locations(MAC_CA_FILE)
     resp = urllib.request.urlopen(req, timeout=120, context=context)
     total = int(resp.headers.get("Content-Length", 0))
