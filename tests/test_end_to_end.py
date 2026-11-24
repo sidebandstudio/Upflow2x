@@ -22,6 +22,7 @@ from lupa import LuaRuntime  # noqa: E402
 
 from Installer.install_upflow2x import write_config  # noqa: E402
 from tests import fake_rife  # noqa: E402
+from tests.test_lua_ui import run_file  # noqa: E402
 
 HARNESS = Path(__file__).resolve().parent / "lua_harness.lua"
 # A name a Windows folder cannot take as it is, and the folder it gets.
@@ -82,7 +83,7 @@ FINISH_TIMEOUT = 300.0
 def finish(H, timeout: float = FINISH_TIMEOUT):
     """Wait for the background render, then let the panel pick up the result."""
     root = Path(H.plugin_root)
-    status = root / ".eternal2x_status.json"
+    status = run_file(root, "status")
     deadline = time.time() + timeout
     last = None
 
@@ -98,7 +99,7 @@ def finish(H, timeout: float = FINISH_TIMEOUT):
         time.sleep(0.05)
 
     # Say what actually happened, rather than just that time ran out.
-    log = root / ".upflow2x_last_run.log"
+    log = run_file(root, "log")
     detail = log.read_text(errors="replace")[-2000:] if log.exists() else "(no log written)"
     raise AssertionError(
         f"the render did not finish within {timeout}s.\n"
@@ -262,7 +263,7 @@ def test_a_python_that_cannot_start_is_reported_not_waited_on(installation, tmp_
     H, _src = installation(clip_name="second.avi")
     H.click("SmoothBtn")
 
-    exit_file = Path(H.plugin_root) / ".eternal2x_exit"
+    exit_file = run_file(Path(H.plugin_root), "exit")
     deadline = time.time() + 60
     while not exit_file.exists() and time.time() < deadline:
         time.sleep(0.05)

@@ -209,24 +209,58 @@ local DO_INTERPOLATE = parse_bool(conf["interpolate"], true)
 local THRESHOLD = math.max(1, math.min(9, math.floor(tonumber(conf["threshold"] or "5") or 5)))
 local FORMAT = conf["format"] or "png"
 
-local STATUS_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_status.json")
--- Stop creates this, and the run ends at its next frame.
-local STOP_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_status.stop")
--- The frames marked on the clip go to the stage in this file. A long clip's
--- list does not fit on a Windows command line.
-local MARKS_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_marks.txt")
-local LOG_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".upflow2x_last_run.log")
+local RUN_DIR = REPO_ROOT ~= "" and REPO_ROOT or root
 -- The update check runs each time the panel opens, so it logs apart from
 -- renders. Sharing a log wiped the render's, the one worth sending in.
-local UPDATE_LOG_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_update.log")
-local RUN_SCRIPT = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_run.cmd")
+local UPDATE_LOG_PATH = join_path(RUN_DIR, ".eternal2x_update.log")
 -- Opens Explorer at a render, for the same reason the run goes through a
 -- script: see Show in Folder.
-local REVEAL_SCRIPT = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_reveal.cmd")
--- Written by the shell once Python exits, however it exits. A Python that
--- cannot start never writes a status file, so this is how the panel tells a
--- run that is still going from one that died.
-local EXIT_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_exit")
+local REVEAL_SCRIPT = join_path(RUN_DIR, ".eternal2x_reveal.cmd")
+
+-- Each run has files of its own, named by a tag the panel gives it:
+--   status  Python's progress and result, moved into place whole each time
+--   tmp     where Python writes the status before moving it
+--   stop    Stop creates this, and the run ends at its next frame
+--   exit    written by the shell once Python exits, however it exits. A
+--           Python that cannot start never writes a status, so this is how
+--           the panel tells a run still going from one that died
+--   marks   the frames marked on the clip. A long clip's list does not fit on
+--           a Windows command line
+--   script  the command a run starts from on Windows
+--   log     everything the run printed
+-- Python finds tmp and stop beside the status, so they follow its name. A
+-- run the panel has given up on can still be writing, and with files of its
+-- own it never writes over, stops or ends the run after it. Tag "" is the one
+-- set of names every run had before 0.5.2, so a run from then is still found.
+local function run_files(tag)
+    local names
+    if tag == "" then
+        names = { status = ".eternal2x_status.json", tmp = ".eternal2x_status.tmp",
+                  stop = ".eternal2x_status.stop", exit = ".eternal2x_exit",
+                  marks = ".eternal2x_marks.txt", script = ".eternal2x_run.cmd",
+                  log = ".upflow2x_last_run.log" }
+    else
+        local base = ".upflow2x_run-" .. tag
+        names = { status = base .. ".json", tmp = base .. ".tmp", stop = base .. ".stop",
+                  exit = base .. ".exit", marks = base .. ".marks", script = base .. ".cmd",
+                  log = base .. ".log" }
+    end
+    for kind, name in pairs(names) do names[kind] = join_path(RUN_DIR, name) end
+    return names
+end
+
+-- Names the run the panel owns, the only one it follows, stops or imports.
+-- Written before that run starts, so a panel opened later finds it too.
+local RUN_POINTER = join_path(RUN_DIR, ".upflow2x_run")
+local RUN_TAG, STATUS_PATH, STOP_PATH, EXIT_PATH, MARKS_PATH, RUN_SCRIPT, LOG_PATH
+
+local function use_run(tag)
+    local files = run_files(tag)
+    RUN_TAG = tag
+    STATUS_PATH, STOP_PATH, EXIT_PATH = files.status, files.stop, files.exit
+    MARKS_PATH, RUN_SCRIPT, LOG_PATH = files.marks, files.script, files.log
+end
+use_run((read_file(RUN_POINTER) or ""):match("^%s*([%w%-]*)"))
 
 local function save_conf()
     local f = io.open(CONF_PATH, "w")
@@ -811,12 +845,6 @@ end
 
 local function read_status()
     return read_status_at(STATUS_PATH)
-end
-
-local function clear_status()
-    os.remove(STATUS_PATH)
-    os.remove(EXIT_PATH)
-    os.remove(STOP_PATH)
 end
 
 -- The exit code of the last background run, or nil while it is still going.
@@ -1781,16 +1809,17 @@ end
 -- One look at the run for a press of Stop or Reset: the exit code, then the
 -- status, each read once. Python writes its last status before it exits and
 -- the shell then writes the exit code, so a status read after the exit code
--- is final. "finished" comes with that status, "live" is a run Stop can end,
--- and "gone" is one that died or went quiet, or no run at all.
+-- is final. "finished" is a run with its result, "live" a run Stop can end,
+-- and "gone" one that died or went quiet, or no run at all. The status and
+-- exit code read come back with it.
 local function look()
     local exited = read_exit_code()
     local st = read_status()
-    if st and st.done then return "finished", st end
-    if exited then return "gone" end
+    if st and st.done then return "finished", st, exited end
+    if exited then return "gone", st, exited end
     local last = (st and st.updated) or (RUNNING and LAUNCHED_AT)
-    if last and math.abs(os.time() - last) < STALLED_AFTER then return "live" end
-    return "gone"
+    if last and math.abs(os.time() - last) < STALLED_AFTER then return "live", st, exited end
+    return "gone", st, exited
 end
 
 -- ---------------------------------------------------------------------------
@@ -1847,6 +1876,9 @@ local function start_polling()
     end
 end
 
+local CANNOT_START = "Could not start the run. Check that Upflow2x's folder can be written to, "
+    .. "then try again."
+
 -- A run that never started has nothing to poll, so the panel says so now.
 local function start_run(args)
     LAUNCHED_AT = os.time()
@@ -1854,13 +1886,103 @@ local function start_run(args)
         start_polling()
         return
     end
-    local msg = "Could not start the run. Check that Upflow2x's folder can be written to, "
-        .. "then try again."
+    local msg = CANNOT_START
     set_busy(false)
     set_progress(0, nil)
     if ANALYSING then items.AnalysisLabel.Text = msg end
     ANALYSING = false
     set_status(msg)
+end
+
+local WAITING = "A render finished while the panel was closed. "
+    .. "Press Refresh Progress to add it to the timeline."
+local PENDING = "A finished render has not been added yet. "
+    .. "Press Refresh Progress to add it to the timeline."
+
+-- A finished run met by Stop, Reset or a new run. This panel's run is
+-- handled as a poll would, importing its render once. A render with no run
+-- to follow, such as one that finished while the panel was closed or after
+-- Reset gave up on it, waits for Refresh Progress.
+-- False when there is nothing worth keeping, such as an old failure.
+local function settle(st)
+    if RUNNING then return apply_status(st) end
+    if st.ok and st.import_path ~= "" then
+        set_status(PENDING)
+        return true
+    end
+    return false
+end
+
+-- How Reset takes the status of a run the look found gone. It can still
+-- finish just after the look, so the status is moved aside in one step and
+-- read there, never deleted unread. A finished one goes back in place for the
+-- caller to handle, and a status written after the move is a new file Reset
+-- leaves.
+local function claim_status()
+    local aside = STATUS_PATH .. ".reset"
+    os.remove(aside)
+    if not os.rename(STATUS_PATH, aside) then return nil end
+    local st = read_status_at(aside)
+    if st and st.done then
+        os.rename(aside, STATUS_PATH)
+        return st
+    end
+    os.remove(aside)
+    return st
+end
+
+-- The run the panel owns comes before a new one, which would take its place:
+-- a result not yet imported, or a run Reset gave up on that turns out to be
+-- going. Checked before the new run changes anything that belongs to it: the
+-- clip, where its render goes, its markers. True when it comes first, and
+-- the new run doesn't start. Also whether that look found its exit code: the
+-- run has ended, and its status, read after the exit code, was final.
+local function last_run_first()
+    local state, st, exited = look()
+    local ended = exited ~= nil
+    if state == "finished" then
+        if settle(st) then return true, ended end
+        -- Nothing worth keeping, and a finished run writes nothing more.
+        os.remove(STATUS_PATH)
+        return false, ended
+    end
+    -- Render and Analyse can only be pressed while no run is being followed,
+    -- so a live one here is one Reset gave up on, writing again.
+    if state ~= "live" or not st then return false, ended end
+    -- Still going, so it is followed rather than replaced. Its heartbeat
+    -- counts until it writes again, as a launch does.
+    LAUNCHED_AT = st.updated
+    ANALYSING = RUN_KIND == "analysis"
+    set_busy(true)
+    set_progress(st.fraction, st.stage)
+    start_polling()
+    set_status("A run started earlier is still going. Its progress shows here.")
+    return true, ended
+end
+
+local RUNS_STARTED = 0
+
+-- Gives the new run files of its own and names it in the pointer, which
+-- makes it the run the panel owns. The last run's files go when `ended`, the
+-- look before it, showed that run had ended. One that may still be going
+-- keeps them, and they are the only files it can write to. False when the
+-- pointer could not be written, as a panel opened later could not find it.
+local function begin_run(ended)
+    if ended then
+        for _, path in pairs(run_files(RUN_TAG)) do os.remove(path) end
+    end
+    local tag
+    repeat
+        RUNS_STARTED = RUNS_STARTED + 1
+        tag = string.format("%d-%d-%s", os.time(), RUNS_STARTED,
+                            ((tostring({}):gsub("%W", "")):sub(-6)))
+    until not (exists(run_files(tag).status) or exists(run_files(tag).exit))
+    local f = io.open(RUN_POINTER, "w")
+    local wrote = f and f:write(tag)
+    local closed = f and f:close()
+    if not (wrote and closed) then return false end
+    use_run(tag)
+    return true
 end
 
 -- ---------------------------------------------------------------------------
@@ -1890,10 +2012,15 @@ function win.On.AnalyseBtn.Clicked(ev)
         set_status(launch_problem())
         return
     end
+    local first, ended = last_run_first()
+    if first then return end
     if not pick_source() then return end
     -- Backgrounded like the render: analysis is quick on a short clip but can
     -- take tens of seconds on a long one, and Resolve must not freeze for it.
-    clear_status()
+    if not begin_run(ended) then
+        set_status(CANNOT_START)
+        return
+    end
     offer_log(false)
     ANALYSING = true
     RUN_KIND = "analysis"
@@ -1917,12 +2044,19 @@ function win.On.SmoothBtn.Clicked(ev)
         set_status(launch_problem())
         return
     end
+    local first, ended = last_run_first()
+    if first then return end
     if not pick_source() then return end
     -- Read before anything starts. Rendering as if unmarked would throw away
     -- the frames the editor chose.
     local marks = clip_marks(SOURCE_ITEM)
     if not marks then
         set_status("Could not read the markers on the clip from Resolve, so nothing was rendered.")
+        return
+    end
+    -- The marked frames go in the new run's own file, so it comes first.
+    if not begin_run(ended) then
+        set_status(CANNOT_START)
         return
     end
     if #marks > 0 then
@@ -1935,7 +2069,6 @@ function win.On.SmoothBtn.Clicked(ev)
             return
         end
     end
-    clear_status()
     offer_log(false)
     IMPORTED = false
     ANALYSING = false
@@ -2028,44 +2161,11 @@ function win.On.RefreshStatusBtn.Clicked(ev)
     poll()
 end
 
-local WAITING = "A render finished while the panel was closed. "
-    .. "Press Refresh Progress to add it to the timeline."
-
--- A finished run met by Stop or Reset. This panel's run is handled as a poll
--- would, importing its render once. A render that finished while the panel
--- was closed waits for Refresh Progress, as the panel said when it opened.
--- False when there is nothing worth keeping, such as an old failure.
-local function settle(st)
-    if RUNNING then return apply_status(st) end
-    if st.ok and st.import_path ~= "" then
-        set_status(WAITING)
-        return true
-    end
-    return false
-end
-
--- Reset's side of a run the look found gone. The run can still finish just
--- after the look, so the status is moved aside in one step and read there,
--- never deleted unread. A finished one goes back in place for the caller to
--- handle, and a status written after the move is a new file Reset leaves.
-local function claim_status()
-    local aside = STATUS_PATH .. ".reset"
-    os.remove(aside)
-    if not os.rename(STATUS_PATH, aside) then return nil end
-    local st = read_status_at(aside)
-    if st and st.done then
-        os.rename(aside, STATUS_PATH)
-        return st
-    end
-    os.remove(aside)
-    return st
-end
-
 function win.On.CancelBtn.Clicked(ev)
     -- One look decides, and nothing reads the run again to change its mind.
     -- With two reads, a run that finished in between was taken for gone, and
     -- its result was cleared before the import.
-    local state, st = look()
+    local state, st, exited = look()
     if state == "live" then
         stop_unasked()
         if not STOP_ASKED then
@@ -2092,19 +2192,25 @@ function win.On.CancelBtn.Clicked(ev)
         set_status(f and "Stopping..." or "Could not stop the run.")
         return
     end
+    -- Gone with no exit code, the run may only have gone quiet, and may
+    -- still finish after a new run has taken its place.
+    local giving_up = state == "gone" and not exited and (st ~= nil or RUNNING)
+        and RUN_KIND ~= "analysis"
     if state == "gone" then st = claim_status() end
     if st and st.done then
         if settle(st) then return end
         -- Nothing worth keeping, and a finished run writes nothing more.
         os.remove(STATUS_PATH)
     end
-    os.remove(EXIT_PATH)
+    -- The exit code stays: it shows the run has ended, so the next run can
+    -- clear its files.
     os.remove(STOP_PATH)
     ANALYSING = false
     IMPORTED = false
     set_busy(false)
     set_progress(0, nil)
-    set_status("Ready.")
+    set_status(giving_up and "Ready. If the run you reset finishes after all, "
+        .. "its render is in the Save to folder." or "Ready.")
 end
 
 function win.On.ThresholdSlider.ValueChanged(ev)

@@ -247,8 +247,8 @@
                     <details>
                         <summary>Progress seems stuck</summary>
                         <div class="answer">
-                            <p>Press Refresh Progress. If the panel says Python hasn't started, or that there's been no progress for a few minutes, the run stopped. Press Reset and run it again.</p>
-                            <p>For anything else, send the panel's status text, including any exit code. If the failed run wrote to <code>.upflow2x_last_run.log</code>, include that file too. From 0.5.2, <strong>Open Log</strong> is available when the file has content. Setup puts it in <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code> on Windows or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code> on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in.</p>
+                            <p>Press Refresh Progress. If the panel still shows no progress, press Reset to try again. In 0.5.2, if the old render finishes after you start another one, its files stay in the old run's Save to folder. You can import them manually.</p>
+                            <p>For anything else, send the panel's status text, including any exit code. In 0.5.2, use <strong>Open Log</strong> to find the log for that run, if it wrote one. Its name matches <code>.upflow2x_run-*.log</code>. In 0.5.1, look for <code>.upflow2x_last_run.log</code>. The plugin folder is <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code> on Windows or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code> on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in.</p>
                         </div>
                     </details>
                     <details>

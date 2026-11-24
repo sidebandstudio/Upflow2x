@@ -514,6 +514,29 @@ def test_the_panels_stop_ends_the_run(make_anime, monkeypatch, tmp_path):
     assert not list(out.rglob("*.mp4")) and not list(out.rglob("*.png"))
 
 
+@pytest.mark.parametrize("how", ["stopped", "finished"])
+def test_runs_with_status_files_of_their_own_touch_only_their_own(make_anime, monkeypatch,
+                                                                  tmp_path, how):
+    """The panel gives each run a status path of its own, and the stage finds
+    its Stop and its unfinished status beside it. Run A, given up on, ending
+    late beside run B, never takes B's Stop or writes over B's status."""
+    src = make_anime(holds=(2,) * 8)
+    a = tmp_path / ".upflow2x_run-a.json"
+    b = tmp_path / ".upflow2x_run-b.json"
+    b.write_text('{"done": false, "fraction": 0.5}')
+    b.with_suffix(".stop").write_text("")
+    if how == "stopped":
+        a.with_suffix(".stop").write_text("")
+    code = run(monkeypatch, ["--video", str(src), "--status-file", str(a),
+                             "--output-dir", str(tmp_path / "o")])
+    assert code == (1 if how == "stopped" else 0)
+    assert json.loads(a.read_text())["done"] is True
+    assert json.loads(b.read_text()) == {"done": False, "fraction": 0.5}
+    assert b.with_suffix(".stop").exists(), "A's end took B's Stop"
+    assert sorted(p.name for p in tmp_path.glob(".upflow2x_run-*")) == [
+        ".upflow2x_run-a.json", ".upflow2x_run-b.json", ".upflow2x_run-b.stop"]
+
+
 def test_a_stop_while_the_last_frames_are_written_still_counts(make_anime, monkeypatch,
                                                                 tmp_path):
     src = make_anime(holds=(2,) * 8)

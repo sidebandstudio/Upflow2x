@@ -186,7 +186,7 @@ def test_a_folder_ending_in_a_backslash_keeps_the_next_argument(lua, direct):
     got = subprocess.run(line, capture_output=True, text=True, check=True)
     args = build_parser().parse_args(json.loads(got.stdout))
     assert args.cache_dir == "D:\\CacheClip\\"
-    assert args.status_file.endswith(".eternal2x_status.json")
+    assert args.status_file.endswith(run_file(direct, "status").name)
 
 
 def test_an_output_folder_in_the_settings_wins(lua, direct):
@@ -522,7 +522,7 @@ def test_the_command_the_panel_builds_actually_runs(lua, direct):
     cmd = H.last_command()
 
     subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    log = (direct / ".upflow2x_last_run.log")
+    log = run_file(direct, "log")
     assert log.exists(), "the panel's command produced no log"
     text = log.read_text()
     for missing in ("No module named 'Stages'", "No module named 'Pipeline'"):
@@ -549,11 +549,35 @@ def test_refresh_picks_up_the_selection(lua, direct):
 # progress reporting
 # --------------------------------------------------------------------------
 
-def write_status(root: Path, **fields):
+LEGACY_RUN_FILES = {"status": ".eternal2x_status.json", "tmp": ".eternal2x_status.tmp",
+                    "stop": ".eternal2x_status.stop", "exit": ".eternal2x_exit",
+                    "marks": ".eternal2x_marks.txt", "script": ".eternal2x_run.cmd",
+                    "log": ".upflow2x_last_run.log"}
+RUN_FILE_ENDINGS = {"status": ".json", "tmp": ".tmp", "stop": ".stop", "exit": ".exit",
+                    "marks": ".marks", "script": ".cmd", "log": ".log"}
+
+
+def run_tag(root: Path) -> str:
+    """The tag of the run the panel owns, from its pointer file. "" for none,
+    which is how every run was named before 0.5.2."""
+    pointer = root / ".upflow2x_run"
+    return pointer.read_text().strip() if pointer.exists() else ""
+
+
+def run_file(root: Path, kind: str, tag: str | None = None) -> Path:
+    """A file of the run tagged `tag`, by default the one the panel owns."""
+    tag = run_tag(root) if tag is None else tag
+    if not tag:
+        return root / LEGACY_RUN_FILES[kind]
+    return root / f".upflow2x_run-{tag}{RUN_FILE_ENDINGS[kind]}"
+
+
+def write_status(root: Path, tag: str | None = None, **fields):
+    """The status a run writes, by default the run the panel owns."""
     payload = {"stage": "Rendering", "fraction": 0.5, "message": "",
                "import_path": "", "done": False, "ok": False, "updated": 0}
     payload.update(fields)
-    (root / ".eternal2x_status.json").write_text(json.dumps(payload))
+    run_file(root, "status", tag).write_text(json.dumps(payload))
 
 
 def test_progress_is_shown_while_running(lua, direct):
@@ -608,7 +632,7 @@ def test_the_progress_bar_is_empty_until_a_run_starts(lua, direct):
     assert bar_fill(H) is None
     H.click("SmoothBtn")
     assert bar_fill(H) is not None
-    (direct / ".eternal2x_exit").write_text("1\n")
+    run_file(direct, "exit").write_text("1\n")
     H.click("CancelBtn")
     assert bar_fill(H) is None
 
@@ -665,11 +689,11 @@ def test_reset_clears_a_stuck_run(lua, direct):
     """The run ended without saying it was done, and the panel never polled."""
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    (direct / ".eternal2x_exit").write_text("1\n")
+    run_file(direct, "exit").write_text("1\n")
     H.click("CancelBtn")
     assert H.enabled("SmoothBtn")
     assert H.widgets["Progress"].Text == ""
-    assert not (direct / ".eternal2x_status.json").exists()
+    assert not run_file(direct, "status").exists()
 
 
 def test_refreshing_with_no_run_says_so(lua, direct):
@@ -734,7 +758,7 @@ def test_the_background_command_redirects_into_the_log(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
     cmd = H.last_command()
-    assert ".upflow2x_last_run.log" in cmd
+    assert run_file(direct, "log").name in cmd
     assert "2>&1" in cmd
 
 
@@ -1445,7 +1469,7 @@ def test_the_windows_run_opens_no_window(lua, direct):
     created = lua.eval("CREATED")
     last = created[len(created)]
     assert last.flags == 0x08000000
-    assert last.line.endswith(" /c .\\.eternal2x_run.cmd"), last.line
+    assert last.line.endswith(" /c .\\" + run_file(direct, "script").name), last.line
     assert "start" not in last.line and "/MIN" not in last.line, last.line
     assert last.cwd == str(direct).replace("/", "\\"), last.cwd
     assert not any("start" in c for c in H.commands.values()), "os.execute ran it as well"
@@ -1482,11 +1506,11 @@ def test_the_windows_background_run_goes_through_a_script(lua, direct):
     cmd = H.last_command()
     outer = cmd.split("\n")[0]
     assert outer.startswith('start "Upflow2x" /D "'), outer
-    assert outer.endswith(" /MIN cmd /c .\\.eternal2x_run.cmd"), outer
+    assert outer.endswith(" /MIN cmd /c .\\" + run_file(direct, "script").name), outer
     assert "/" not in outer.split("/D ")[1].split(" /MIN")[0], outer
     assert "Tom & Jerry" not in outer, "the clip path must not be on the outer command line"
 
-    script = (direct / ".eternal2x_run.cmd").read_bytes()
+    script = run_file(direct, "script").read_bytes()
     assert b"\r\r\n" not in script
     text = script.decode("utf-8")
     assert text.startswith("@echo off\r\nchcp 65001 >nul\r\n")
@@ -1538,22 +1562,21 @@ def test_a_throwing_api_does_not_stop_the_panel_opening(lua, direct):
 def test_a_run_that_died_without_a_status_is_reported(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    (direct / ".upflow2x_last_run.log").write_text(
+    run_file(direct, "log").write_text(
         "Traceback (most recent call last):\nModuleNotFoundError: No module named 'cv2'\n")
-    (direct / ".eternal2x_exit").write_text("1\n")
+    run_file(direct, "exit").write_text("1\n")
     H.click("RefreshStatusBtn")
     assert "No module named 'cv2'" in H.status()
     assert H.enabled("SmoothBtn"), "the panel stayed busy after the run died"
 
 
-LOG_NAME = ".upflow2x_last_run.log"
 
 
 def die(H, root, log="Traceback (most recent call last):\nRuntimeError: boom\n"):
     """A render whose Python exits without saying it is done."""
     H.click("SmoothBtn")
-    (root / LOG_NAME).write_text(log)
-    (root / ".eternal2x_exit").write_text("1\n")
+    run_file(root, "log").write_text(log)
+    run_file(root, "exit").write_text("1\n")
     H.click("RefreshStatusBtn")
 
 
@@ -1565,10 +1588,10 @@ def test_a_run_that_died_offers_its_log(lua, direct):
     die(H, direct)
     assert H.text_of("FolderBtn") == "Open Log" and H.enabled("FolderBtn")
     assert H.status() == "Stopped without finishing: RuntimeError: boom Open Log shows the rest."
-    assert LOG_NAME in H.widgets["FolderBtn"].ToolTip
+    assert run_file(direct, "log").name in H.widgets["FolderBtn"].ToolTip
     H.click("FolderBtn")
     cmd = H.last_command().replace("\\", "/")
-    assert f"{direct.as_posix()}/{LOG_NAME}" in cmd
+    assert run_file(direct, "log").as_posix() in cmd
     assert 'start "" notepad ' in cmd or "open -t " in cmd
 
 
@@ -1579,7 +1602,8 @@ def test_the_log_opens_in_notepad_on_windows(lua, direct):
     H.click("FolderBtn")
     script = (direct / ".eternal2x_reveal.cmd").read_bytes().decode("utf-8")
     line = script.split("\r\n")[2]
-    assert line.startswith('start "" notepad "') and line.endswith(LOG_NAME + '"'), line
+    assert line.startswith('start "" notepad "'), line
+    assert line.endswith(run_file(direct, "log").name + '"'), line
 
 
 def test_the_log_opens_in_a_text_editor_on_a_mac(lua, direct):
@@ -1595,7 +1619,7 @@ def test_the_log_opens_in_a_text_editor_on_a_mac(lua, direct):
 def test_a_run_that_failed_with_a_message_offers_its_log(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    (direct / LOG_NAME).write_text("Traceback (most recent call last):\nValueError: odd\n")
+    run_file(direct, "log").write_text("Traceback (most recent call last):\nValueError: odd\n")
     write_status(direct, done=True, ok=False, message="Upflow2x hit an unexpected error: odd")
     H.click("RefreshStatusBtn")
     assert H.text_of("FolderBtn") == "Open Log"
@@ -1605,7 +1629,7 @@ def test_a_run_that_failed_with_a_message_offers_its_log(lua, direct):
 def test_a_stop_does_not_offer_the_log(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    (direct / LOG_NAME).write_text("Stopped.\n")
+    run_file(direct, "log").write_text("Stopped.\n")
     write_status(direct, done=True, ok=False, message="Stopped.")
     H.click("RefreshStatusBtn")
     assert H.text_of("FolderBtn") == "Show in Folder" and not H.enabled("FolderBtn")
@@ -1642,17 +1666,17 @@ def test_a_finished_run_that_exited_is_not_taken_for_a_crash(lua, direct):
     H.click("SmoothBtn")
     write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
                  import_path="/tmp/out.mp4")
-    (direct / ".eternal2x_exit").write_text("0\n")
+    run_file(direct, "exit").write_text("0\n")
     H.click("RefreshStatusBtn")
     assert "Stopped without finishing" not in H.status()
     assert "above the original" in H.status()
 
 
 def test_starting_a_run_clears_the_last_exit_code(lua, direct):
-    (direct / ".eternal2x_exit").write_text("1\n")
+    run_file(direct, "exit").write_text("1\n")
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    assert not (direct / ".eternal2x_exit").exists()
+    assert not run_file(direct, "exit").exists()
 
 
 def test_the_background_command_records_how_python_exited(lua, direct):
@@ -1662,18 +1686,18 @@ def test_the_background_command_records_how_python_exited(lua, direct):
     if sys.platform.startswith("win"):
         return  # the POSIX form; the Windows script is checked below
     assert cmd.startswith("(") and cmd.endswith(") &"), cmd
-    assert "echo $? > " in cmd and ".eternal2x_exit" in cmd
+    assert "echo $? > " in cmd and run_file(direct, "exit").name in cmd
 
 
 def test_the_windows_script_records_how_python_exited(lua, direct):
     lua.execute('package.config = "\\\\" .. package.config:sub(2)')
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    text = (direct / ".eternal2x_run.cmd").read_bytes().decode("utf-8")
+    text = run_file(direct, "script").read_bytes().decode("utf-8")
     last = text.rstrip("\r\n").split("\r\n")[-1]
     # Redirect first: `echo 2> file` would redirect stderr instead of writing 2.
     assert last.startswith(">") and last.endswith(" echo %ERRORLEVEL%"), last
-    assert ".eternal2x_exit" in last
+    assert run_file(direct, "exit").name in last
 
 
 # --------------------------------------------------------------------------
@@ -1756,7 +1780,7 @@ def test_opening_the_panel_keeps_the_render_log(lua, direct):
     H = load(lua, ui_script(direct))
     cmd = H.last_command()
     assert "Stages.resolve_update" in cmd
-    assert ".eternal2x_update.log" in cmd and ".upflow2x_last_run.log" not in cmd
+    assert ".eternal2x_update.log" in cmd and run_file(direct, "log").name not in cmd
 
 
 @pytest.mark.parametrize("old", [
@@ -1881,6 +1905,9 @@ def test_a_reopened_panel_follows_the_run_it_left_behind(lua, direct):
     assert H.enabled("SmoothBtn")
 
 
+GAVE_UP = "Ready. If the run you reset finishes after all, its render is in the Save to folder."
+
+
 def press_stop(H):
     """Stop asks on its first press and ends the run on the second."""
     H.click("CancelBtn")
@@ -1895,7 +1922,7 @@ def test_reset_does_not_drop_a_run_that_is_still_reporting(lua, direct):
     H.click("SmoothBtn")
     write_status(direct, fraction=0.4, updated=time.time())
     press_stop(H)
-    assert (direct / ".eternal2x_status.json").exists()
+    assert run_file(direct, "status").exists()
     assert not H.enabled("SmoothBtn")
     assert "Stopping" in H.status()
 
@@ -1917,7 +1944,7 @@ def test_a_heartbeat_from_before_the_clock_moved_back_is_not_a_live_run(lua, dir
     H = load(lua, ui_script(direct))
     assert H.enabled("SmoothBtn")
     H.click("CancelBtn")
-    assert H.status() == "Ready."
+    assert H.status() == GAVE_UP
 
 
 def test_the_panel_keeps_its_own_word_while_a_run_reports_progress(lua, direct):
@@ -1954,7 +1981,7 @@ def test_reset_clears_a_run_that_went_quiet(lua, direct):
     write_status(direct, fraction=0.4, updated=time.time() - 10 * 60)
     H.click("CancelBtn")
     assert H.enabled("SmoothBtn")
-    assert H.status() == "Ready."
+    assert H.status() == GAVE_UP
 
 
 def test_no_update_while_a_render_runs(lua, direct):
@@ -2172,7 +2199,13 @@ def test_an_unwritable_run_script_does_not_rerun_the_last_one(lua, direct):
     """The script left from the last run would start in its place."""
     H = load(lua, ui_script(direct))
     lua.execute('package.config = "\\\\" .. package.config:sub(2)')
-    (direct / ".eternal2x_run.cmd").mkdir()
+    lua.execute("""
+        local real_open = io.open
+        io.open = function(path, mode)
+            if tostring(path):find("%.cmd$") and (mode or "r"):find("w") then return nil end
+            return real_open(path, mode)
+        end
+    """)
     before = H.command_count()
     H.click("AnalyseBtn")
     assert H.command_count() == before, "a run started without its script"
@@ -2190,7 +2223,7 @@ def test_stop_ends_a_run_that_is_going(lua, direct):
     assert H.text_of("CancelBtn") == "Stop"
     write_status(direct, fraction=0.3, updated=time.time())
     press_stop(H)
-    assert (direct / ".eternal2x_status.stop").exists()
+    assert run_file(direct, "stop").exists()
     assert "Stopping" in H.status()
     write_status(direct, fraction=0.3, done=True, ok=False, message="Stopped.")
     H.click("RefreshStatusBtn")
@@ -2200,10 +2233,10 @@ def test_stop_ends_a_run_that_is_going(lua, direct):
 
 
 def test_a_stop_left_over_does_not_stop_the_next_run(lua, direct):
-    (direct / ".eternal2x_status.stop").write_text("")
+    run_file(direct, "stop").write_text("")
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    assert not (direct / ".eternal2x_status.stop").exists()
+    assert not run_file(direct, "stop").exists()
 
 
 def test_one_press_of_stop_only_asks(lua, direct):
@@ -2215,14 +2248,14 @@ def test_one_press_of_stop_only_asks(lua, direct):
     plain = H.widgets["CancelBtn"].StyleSheet
     write_status(direct, fraction=0.6, updated=time.time())
     H.click("CancelBtn")
-    assert not (direct / ".eternal2x_status.stop").exists()
+    assert not run_file(direct, "stop").exists()
     assert not H.enabled("SmoothBtn"), "the render was dropped"
     assert H.status().startswith("Press Stop again to end the render.")
     assert "deletes the frames" in H.status()
     asking = H.widgets["CancelBtn"].StyleSheet
     assert asking != plain and "color: #f2a93b; }" in asking.split("}")[0] + "}"
     H.click("CancelBtn")
-    assert (direct / ".eternal2x_status.stop").exists()
+    assert run_file(direct, "stop").exists()
     assert H.widgets["CancelBtn"].StyleSheet == plain
 
 
@@ -2238,7 +2271,7 @@ def test_an_unanswered_stop_goes_back_to_how_it_was(lua, direct):
     assert H.widgets["CancelBtn"].StyleSheet == plain
     # A press long after the first asks again rather than stopping.
     H.click("CancelBtn")
-    assert not (direct / ".eternal2x_status.stop").exists()
+    assert not run_file(direct, "stop").exists()
     assert H.status().startswith("Press Stop again")
 
 
@@ -2249,9 +2282,9 @@ def test_a_second_press_too_late_asks_again_without_a_timer(lua, direct):
     H.click("CancelBtn")
     advance_clock(lua, 6)
     H.click("CancelBtn")
-    assert not (direct / ".eternal2x_status.stop").exists()
+    assert not run_file(direct, "stop").exists()
     H.click("CancelBtn")
-    assert (direct / ".eternal2x_status.stop").exists()
+    assert run_file(direct, "stop").exists()
 
 
 def test_stop_says_what_a_stopped_render_loses(lua, direct):
@@ -2277,9 +2310,9 @@ def test_stop_on_a_run_from_an_earlier_panel_does_not_call_it_a_render(lua, dire
     H.click("CancelBtn")
     assert H.status() == ("Press Stop again to end the run. "
                           "Stopping a render deletes the frames it has drawn so far.")
-    assert not (direct / ".eternal2x_status.stop").exists()
+    assert not run_file(direct, "stop").exists()
     H.click("CancelBtn")
-    assert (direct / ".eternal2x_status.stop").exists()
+    assert run_file(direct, "stop").exists()
 
 
 @pytest.mark.parametrize("asked", [False, True])
@@ -2298,11 +2331,11 @@ def test_a_render_that_finishes_between_looks_is_imported_not_reset(lua, direct,
     write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
                  import_path=str(direct / "shot_smooth.mp4"), updated=time.time())
     if exited:
-        (direct / ".eternal2x_exit").write_text("0\n")
+        run_file(direct, "exit").write_text("0\n")
     H.click("CancelBtn")
     assert H.imported_count() == 1
     assert "above the original" in H.status()
-    assert not (direct / ".eternal2x_status.stop").exists()
+    assert not run_file(direct, "stop").exists()
     assert H.enabled("SmoothBtn") and H.text_of("CancelBtn") == "Reset"
     H.click("RefreshStatusBtn")
     assert "No run in progress" in H.status()
@@ -2347,7 +2380,7 @@ def finish_during_next_click(H, root, exited, **fields):
         status.update(fields)
         write_status(root, **status)
         if exited:
-            (root / ".eternal2x_exit").write_text("0\n")
+            run_file(root, "exit").write_text("0\n")
 
     H.after_status_read = publish
 
@@ -2367,7 +2400,7 @@ def test_a_render_that_finishes_during_a_stop_press_keeps_its_result(lua, direct
     finish_during_next_click(H, direct, exited)
     H.click("CancelBtn")
     assert H.after_status_read is None, "the render did not finish during the press"
-    assert (direct / ".eternal2x_status.json").exists(), "Stop deleted the finished render"
+    assert run_file(direct, "status").exists(), "Stop deleted the finished render"
     assert H.status() != "Ready."
     assert H.imported_count() == 0
     H.click("RefreshStatusBtn")
@@ -2397,7 +2430,7 @@ def test_a_quiet_render_that_finishes_during_reset_keeps_its_result(lua, direct,
     assert H.after_status_read is None
     assert H.imported_count() == 1
     assert "above the original" in H.status()
-    assert not (direct / ".eternal2x_status.json.reset").exists()
+    assert not Path(str(run_file(direct, "status")) + ".reset").exists()
     H.click("RefreshStatusBtn")
     assert H.imported_count() == 1
 
@@ -2411,17 +2444,22 @@ def test_a_run_that_is_really_gone_resets_in_one_press(lua, direct, case):
     if case == "exited mid-run":
         write_status(direct, fraction=0.5, updated=time.time())
     if case.startswith("exited"):
-        (direct / ".eternal2x_exit").write_text("1\n")
+        run_file(direct, "exit").write_text("1\n")
     elif case == "went quiet":
         write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
     else:
         advance_clock(lua, 10 * 60)
     H.click("CancelBtn")
-    assert H.status() == "Ready."
+    exited = case.startswith("exited")
+    # Without an exit code the run may only have gone quiet, so Reset says
+    # where its render goes if it finishes after all.
+    assert H.status() == ("Ready." if exited else GAVE_UP)
     assert H.enabled("SmoothBtn")
-    for name in (".eternal2x_status.json", ".eternal2x_status.json.reset",
-                 ".eternal2x_exit", ".eternal2x_status.stop"):
-        assert not (direct / name).exists(), name
+    for kind in ("status", "stop"):
+        assert not run_file(direct, kind).exists(), kind
+    assert not Path(str(run_file(direct, "status")) + ".reset").exists()
+    # The exit code stays, as proof the run ended, so the next run clears its files.
+    assert run_file(direct, "exit").exists() == exited
 
 
 def test_reset_keeps_a_render_that_finished_while_the_panel_was_closed(lua, direct):
@@ -2430,7 +2468,7 @@ def test_reset_keeps_a_render_that_finished_while_the_panel_was_closed(lua, dire
                  import_path=str(direct / "shot_smooth.mp4"))
     H = load(lua, ui_script(direct))
     H.click("CancelBtn")
-    assert (direct / ".eternal2x_status.json").exists()
+    assert run_file(direct, "status").exists()
     assert "Press Refresh Progress to add it" in H.status()
     assert H.imported_count() == 0
     H.click("RefreshStatusBtn")
@@ -2441,7 +2479,7 @@ def test_reset_with_no_run_keeps_a_render_that_lands_during_it(lua, direct):
     H = load(lua, ui_script(direct))
     finish_during_next_click(H, direct, exited=True)
     H.click("CancelBtn")
-    assert (direct / ".eternal2x_status.json").exists()
+    assert run_file(direct, "status").exists()
     assert "Press Refresh Progress to add it" in H.status()
     H.click("RefreshStatusBtn")
     assert H.imported_count() == 1
@@ -2452,14 +2490,285 @@ def test_reset_clears_an_old_failure_from_a_closed_panel(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("CancelBtn")
     assert H.status() == "Ready."
-    assert not (direct / ".eternal2x_status.json").exists()
+    assert not run_file(direct, "status").exists()
+
+
+def publish_after_next_claim(H, root, exited=False, **fields):
+    """The run publishes a status, by default a finished render, and with
+    exited its exit code, right after the panel's next click moves the status
+    file aside."""
+    import time
+
+    def publish():
+        status = {"fraction": 1.0, "done": True, "ok": True, "message": "Rendered.",
+                  "import_path": str(root / "shot_smooth.mp4"), "updated": time.time()}
+        status.update(fields)
+        write_status(root, **status)
+        if exited:
+            run_file(root, "exit").write_text("0\n")
+
+    H.after_claim = publish
+
+
+def reset_a_quiet_render(lua, H, root, reported=True):
+    """A render this panel started that has gone quiet, so Reset gives up on it."""
+    import time
+    H.click("SmoothBtn")
+    if reported:
+        write_status(root, fraction=0.3, updated=time.time() - 10 * 60)
+    else:
+        advance_clock(lua, 10 * 60)
+
+
+@pytest.mark.parametrize("start", ["SmoothBtn", "AnalyseBtn"])
+@pytest.mark.parametrize("exited", [False, True])
+def test_a_render_that_finishes_just_after_resets_claim_survives_the_next_start(
+        lua, direct, start, exited):
+    """Reset moved the quiet run's status aside, the render then finished and
+    wrote a new one, Reset said Ready, and Render or Analyse cleared it unseen."""
+    H = load(lua, ui_script(direct))
+    reset_a_quiet_render(lua, H, direct)
+    publish_after_next_claim(H, direct, exited)
+    H.click("CancelBtn")
+    assert H.after_claim is None, "the render did not finish during Reset"
+    assert H.status() == GAVE_UP
+    launches = H.command_count()
+    for _ in range(3):
+        H.click(start)
+        assert H.command_count() == launches, "a new run started over the finished render"
+        assert run_file(direct, "status").exists(), "the finished render was cleared"
+        assert "Press Refresh Progress to add it" in H.status()
+        assert H.imported_count() == 0
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert "placed on V2 above the original" in H.status()
+    H.click(start)
+    assert H.command_count() == launches + 1
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+
+
+def test_a_quiet_render_that_is_still_going_after_reset_is_followed_not_doubled(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    reset_a_quiet_render(lua, H, direct)
+    publish_after_next_claim(H, direct, fraction=0.6, done=False, ok=False,
+                             import_path="", updated=time.time())
+    H.click("CancelBtn")
+    launches = H.command_count()
+    H.click("SmoothBtn")
+    assert H.command_count() == launches, "a second run started over the one still going"
+    assert not H.enabled("SmoothBtn") and not H.enabled("AnalyseBtn")
+    assert "still going" in H.status()
+    assert "60%" in H.widgets["Progress"].Text
+    H.click("RefreshStatusBtn")
+    assert "has not started" not in H.status() and "No progress" not in H.status()
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path=str(direct / "shot_smooth.mp4"), updated=time.time())
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert "placed on V2 above the original" in H.status()
+
+
+# --------------------------------------------------------------------------
+# a run Reset gave up on, and the run that takes its place
+# --------------------------------------------------------------------------
+
+def give_up_on_a_quiet_render(H, root):
+    """Render A of the first clip goes quiet, and Reset gives up on it. A
+    stays alive, as a run killed from outside would not. Returns A's tag."""
+    import time
+    H.click("SmoothBtn")
+    a = run_tag(root)
+    write_status(root, fraction=0.3, updated=time.time() - 10 * 60)
+    H.click("CancelBtn")
+    assert H.status() == GAVE_UP
+    return a
+
+
+def render_the_next_clip(H, root):
+    """Render B of another clip, at another place on the timeline, takes A's
+    place. Returns B's tag."""
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    launches = H.command_count()
+    H.click("SmoothBtn")
+    assert H.command_count() == launches + 1, "B did not start"
+    return run_tag(root)
+
+
+def ends(root, tag, name, exited=True):
+    """The run tagged `tag` finishes its render of `name`, and with exited
+    its shell then writes its exit code."""
+    import time
+    write_status(root, tag, fraction=1.0, done=True, ok=True, message=f"Rendered {name}.",
+                 import_path=f"/renders/{name}_smooth.mp4", updated=time.time())
+    if exited:
+        run_file(root, "exit", tag).write_text("0\n")
+
+
+@pytest.mark.parametrize("a_exits", [False, True])
+@pytest.mark.parametrize("order", ["A ends first", "B ends first"])
+def test_a_run_given_up_on_that_ends_after_the_next_starts_stays_apart(lua, direct, order,
+                                                                      a_exits):
+    """Both used to write one status, exit and stop file: A's late result went
+    in as B's, at B's place, or B's progress wrote over it."""
+    import time
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    b = render_the_next_clip(H, direct)
+    assert a != b and run_file(direct, "status", a) != run_file(direct, "status", b)
+    if order == "A ends first":
+        ends(direct, a, "shot", a_exits)
+    write_status(direct, b, fraction=0.5, updated=time.time())
+    H.click("RefreshStatusBtn")
+    assert "50%" in H.widgets["Progress"].Text, "B's progress was not what the panel saw"
+    assert not H.enabled("SmoothBtn"), "A's end ended B"
+    assert H.imported_count() == 0
+    ends(direct, b, "shot_b")
+    if order == "B ends first":
+        ends(direct, a, "shot", a_exits)
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert H.imported_at(1) == "/renders/shot_b_smooth.mp4"
+    assert H.placements[1].recordFrame == 90000, "B went in at another clip's place"
+    assert "Rendered shot_b." in H.status()
+    for click in ("RefreshStatusBtn", "CancelBtn", "RefreshStatusBtn"):
+        H.click(click)
+    assert H.imported_count() == 1, "A's result came in too"
+    left = json.loads(run_file(direct, "status", a).read_text())
+    assert left["import_path"] == "/renders/shot_smooth.mp4", "A's result was written over"
+
+
+def test_a_late_stop_or_exit_from_a_run_given_up_on_never_reaches_the_next(lua, direct):
+    """A's stage takes its Stop file away as it ends, and its shell then writes
+    its exit code. Shared, that cancelled B's Stop, or made B look dead."""
+    import time
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    b = render_the_next_clip(H, direct)
+    write_status(direct, b, fraction=0.4, updated=time.time())
+    press_stop(H)
+    assert run_file(direct, "stop", b).exists() and not run_file(direct, "stop", a).exists()
+    run_file(direct, "stop", a).unlink(missing_ok=True)
+    run_file(direct, "exit", a).write_text("1\n")
+    assert run_file(direct, "stop", b).exists(), "A's end took B's Stop"
+    H.click("RefreshStatusBtn")
+    assert "Stopped without finishing" not in H.status(), "A's exit code ended B"
+    assert not H.enabled("SmoothBtn")
+
+
+@pytest.mark.parametrize("b_done", [False, True])
+def test_a_panel_opened_again_follows_only_the_run_it_owns(lua, direct, b_done):
+    """The pointer names B, so a reopened panel never takes A's result for it."""
+    import time
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    b = render_the_next_clip(H, direct)
+    ends(direct, a, "shot")
+    if b_done:
+        ends(direct, b, "shot_b")
+    else:
+        write_status(direct, b, fraction=0.5, updated=time.time())
+    H = load(lua, ui_script(direct))
+    assert run_tag(direct) == b
+    if b_done:
+        assert "finished while the panel was closed" in H.status()
+    else:
+        assert "still going" in H.status() and not H.enabled("SmoothBtn")
+        ends(direct, b, "shot_b")
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert H.imported_at(1) == "/renders/shot_b_smooth.mp4"
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert run_file(direct, "status", a).exists()
+
+
+def test_a_run_given_up_on_keeps_its_files_while_it_may_still_write(lua, direct):
+    """Only an exit code shows a run has ended. Without one, its files stay."""
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    write_status(direct, a, fraction=0.31, updated=0)
+    render_the_next_clip(H, direct)
+    assert run_file(direct, "status", a).exists()
+
+
+def test_the_first_run_after_0_5_1_gets_files_of_its_own(lua, direct):
+    """A 0.5.1 run used one set of names. Its result still comes in, and the
+    next run takes new names and clears the old ones once that run has ended."""
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/renders/old_smooth.mp4")
+    (direct / ".eternal2x_exit").write_text("0\n")
+    (direct / ".upflow2x_last_run.log").write_text("Done.\n")
+    H = load(lua, ui_script(direct))
+    assert run_tag(direct) == ""
+    H.click("RefreshStatusBtn")
+    assert H.imported_at(1) == "/renders/old_smooth.mp4"
+    H.click("SmoothBtn")
+    assert run_tag(direct) != ""
+    for name in (".eternal2x_status.json", ".eternal2x_exit", ".upflow2x_last_run.log"):
+        assert not (direct / name).exists(), name
+    assert run_file(direct, "status").name.startswith(".upflow2x_run-")
+
+
+@pytest.mark.parametrize("start", ["SmoothBtn", "AnalyseBtn"])
+@pytest.mark.parametrize("left", ["exited, no status", "exited mid-run", "went quiet",
+                                  "old failure", "old stop", "reopened, quiet"])
+def test_a_start_still_recovers_from_a_run_that_is_really_gone(lua, direct, start, left):
+    import time
+    if left == "reopened, quiet":
+        write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+        H = load(lua, ui_script(direct))
+    else:
+        H = load(lua, ui_script(direct))
+        H.click("SmoothBtn")
+        if left == "exited mid-run":
+            write_status(direct, fraction=0.5, updated=time.time())
+        if left.startswith("exited"):
+            run_file(direct, "exit").write_text("1\n")
+        elif left == "went quiet":
+            write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+        else:
+            write_status(direct, fraction=0.3, done=True, ok=False,
+                         message="Stopped." if left == "old stop" else "The clip is missing.")
+        H.click("CancelBtn")
+    launches = H.command_count()
+    old = run_tag(direct)
+    H.click(start)
+    assert H.command_count() == launches + 1
+    assert not H.enabled("SmoothBtn")
+    assert run_tag(direct) != old, "the new run did not get files of its own"
+    assert not Path(str(run_file(direct, "status", old)) + ".reset").exists()
+    if left.startswith("exited"):
+        # Its exit code shows it ended, so its files go.
+        assert not run_file(direct, "exit", old).exists()
+        assert not run_file(direct, "status", old).exists()
+    elif left == "reopened, quiet":
+        # It may only have gone quiet, so it keeps the one file it writes.
+        assert run_file(direct, "status", old).exists()
+
+
+@pytest.mark.parametrize("start", ["SmoothBtn", "AnalyseBtn"])
+def test_a_start_keeps_a_render_that_finished_while_the_panel_was_closed(lua, direct, start):
+    """The panel said to press Refresh Progress for it, and Render deleted it."""
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path=str(direct / "shot_smooth.mp4"))
+    H = load(lua, ui_script(direct))
+    H.click(start)
+    assert H.command_count() == 0
+    assert run_file(direct, "status").exists()
+    assert "Press Refresh Progress to add it" in H.status()
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    H.click(start)
+    assert H.command_count() == 1
 
 
 def test_reset_of_a_dead_run_needs_one_press(lua, direct):
     """Nothing is lost clearing a run that already ended, so it does not ask."""
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    (direct / ".eternal2x_exit").write_text("1\n")
+    run_file(direct, "exit").write_text("1\n")
     H.click("CancelBtn")
     assert H.status() == "Ready."
     assert H.enabled("SmoothBtn")
@@ -2539,7 +2848,7 @@ def test_a_saved_quality_from_an_older_version_is_dropped(lua, direct):
 
 def marks_sent(direct):
     """The frames Render handed the stage, from the file it wrote them to."""
-    return (direct / ".eternal2x_marks.txt").read_text()
+    return run_file(direct, "marks").read_text()
 
 
 def test_the_run_button_says_render(lua, direct):
@@ -2925,7 +3234,7 @@ def test_a_marks_file_that_fails_to_close_stops_the_render(lua, direct):
     lua.execute("""
         local real = io.open
         io.open = function(path, mode)
-            if tostring(path):find(".eternal2x_marks", 1, true) and mode == "w" then
+            if tostring(path):find("%.marks$") and mode == "w" then
                 return { write = function(self) return self end,
                          close = function() return nil, "disk full" end }
             end

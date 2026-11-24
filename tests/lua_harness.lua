@@ -153,7 +153,7 @@ end
 function H.make_resolve(clip_file_path)
     local mpi = {
         GetClipProperty = function(_self)
-            return { ["File Path"] = clip_file_path, FPS = H.clip_fps or "24" }
+            return { ["File Path"] = H.clip_file or clip_file_path, FPS = H.clip_fps or "24" }
         end,
     }
     local item = { GetMediaPoolItem = function(_self) return mpi end }
@@ -500,13 +500,36 @@ end
 -- the panel first reads its status file, or finds none: the run writing its
 -- status or exit code between the panel's reads. The panel still gets what
 -- it read, as a read that came first would.
+-- H.after_claim runs once during the next click, right after the panel first
+-- tries to move its status file aside, whether or not there was one to move.
+-- Each is cleared once it has run, so a test can tell that it did.
+-- A run's status file, under the names from before 0.5.2 or a run's own.
+local function is_status_file(path)
+    path = tostring(path)
+    return path:find("%.eternal2x_status%.json$") ~= nil
+        or path:find("%.upflow2x_run%-[%w%-]+%.json$") ~= nil
+end
+
 local function interleave()
+    local claim_hook = H.after_claim
+    local real_rename = os.rename
+    if claim_hook then
+        os.rename = function(from, to)
+            local ok, err = real_rename(from, to)
+            if claim_hook and is_status_file(from) then
+                local run = claim_hook
+                claim_hook = nil
+                H.after_claim = nil
+                run()
+            end
+            return ok, err
+        end
+    end
     local hook = H.after_status_read
-    if not hook then return function() end end
-    H.after_status_read = nil
+    if not hook then return function() os.rename = real_rename end end
     local real_open = io.open
     io.open = function(path, mode)
-        if not (hook and tostring(path):find("%.eternal2x_status%.json$")
+        if not (hook and is_status_file(path)
                 and (mode or "r"):sub(1, 1) == "r") then
             return real_open(path, mode)
         end
@@ -515,6 +538,7 @@ local function interleave()
         if f then f:close() end
         local run = hook
         hook = nil
+        H.after_status_read = nil
         run()
         if not f then return nil end
         local left = body
@@ -527,7 +551,10 @@ local function interleave()
             close = function(_self) return true end,
         }
     end
-    return function() io.open = real_open end
+    return function()
+        io.open = real_open
+        os.rename = real_rename
+    end
 end
 
 function H.click(id)
@@ -573,6 +600,13 @@ function H.enabled(id)
 end
 
 function H.set_source_range(a, b) H.source_range = { a, b } end
+-- Moves the playhead to another clip on the same track, of another file, as
+-- an editor does going on to the next shot. H.clip_file overrides the file.
+function H.next_clip(file, id, start, length)
+    H.clip_file, H.item_id = file, id
+    H.src_span = { start, start + length }
+    table.insert(H.tracks[H.item_track or 1], H.src_span)
+end
 function H.add_marker(frame, custom)
     H.markers = H.markers or {}
     H.markers[frame] = { color = "Blue", name = "", note = "", duration = 1, customData = custom or "" }
