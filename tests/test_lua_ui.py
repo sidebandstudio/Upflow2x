@@ -2906,6 +2906,72 @@ def test_a_pointer_that_cannot_be_written_still_names_the_run_before(lua, direct
     assert H.imported_at(1) == "/renders/shot_smooth.mp4"
 
 
+def break_renames(lua, *patterns):
+    """Moving a file whose path matches one of the Lua `patterns` fails, as
+    when another program holds it open. Until mend_renames."""
+    listed = ", ".join(f'"{p}"' for p in patterns)
+    lua.execute(f"""
+        REAL_RENAME = REAL_RENAME or os.rename
+        local real_rename = REAL_RENAME
+        os.rename = function(from, to)
+            for _, pattern in ipairs({{ {listed} }}) do
+                if tostring(from):find(pattern) then return nil, "Permission denied" end
+            end
+            return real_rename(from, to)
+        end
+    """)
+
+
+def mend_renames(lua):
+    lua.execute("if REAL_RENAME then os.rename = REAL_RENAME; REAL_RENAME = nil end")
+
+
+@pytest.mark.parametrize("restore", ["works", "fails"])
+def test_a_pointer_that_cannot_be_moved_into_place_leaves_the_run_before_in_charge(
+        lua, direct, restore):
+    """B started, but its pointer could not replace A's. Removing A's pointer
+    to make room lost it when the move then failed."""
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    held = ["%.upflow2x_run%.new$"] + (["%.upflow2x_run%.old$"] if restore == "fails" else [])
+    break_renames(lua, *held)
+    launches = H.command_count()
+    H.click("SmoothBtn")
+    mend_renames(lua)
+    assert H.command_count() == launches + 1
+    assert "Could not start the run" in H.status()
+    assert H.enabled("SmoothBtn")
+    stops = list(direct.glob(".upflow2x_run-*.stop"))
+    assert len(stops) == 1 and a not in stops[0].name, "B was left to run unowned"
+    pointer, old = direct / ".upflow2x_run", direct / ".upflow2x_run.old"
+    if restore == "works":
+        assert pointer.read_text().strip() == a and not old.exists()
+    else:
+        # A is still found: as the pointer that stepped aside.
+        assert not pointer.exists() and old.read_text().strip() == a
+    ends(direct, a, "shot")
+    H = load(lua, ui_script(direct))
+    assert "finished while the panel was closed" in H.status()
+    H.click("RefreshStatusBtn")
+    assert H.imported_at(1) == "/renders/shot_smooth.mp4"
+    retry_renders_the_next_clip(H, direct, a, 1)
+    assert run_tag(direct) not in ("", a) and not old.exists()
+
+
+def test_a_run_script_that_fails_as_it_closes_starts_nothing(lua, direct):
+    """An empty script still starts a shell, which never starts Python."""
+    H = load(lua, ui_script(direct))
+    lua.execute('package.config = "\\\\" .. package.config:sub(2)')
+    break_writes(lua, "%.cmd$")
+    H.click("SmoothBtn")
+    mend_writes(lua)
+    assert H.command_count() == 0
+    assert "Could not start the run" in H.status()
+    assert run_tag(direct) == ""
+    assert not list(direct.glob(".upflow2x_run-*"))
+
+
 def test_a_failed_first_launch_after_0_5_1_still_finds_the_0_5_1_run(lua, direct):
     import time
     write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
