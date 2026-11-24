@@ -815,6 +815,112 @@ def test_a_quiet_run_that_reports_again_imports_once_when_it_finishes(lua, direc
     assert H.imported_count() == 1
 
 
+def refresh_in_settings(H):
+    """Settings, then its Refresh Progress, as a person reaches it."""
+    if "SettingsBtn" in shown(H):
+        press(H, "SettingsBtn")
+    press(H, "RefreshStatusBtn")
+
+
+def test_a_crash_after_a_heartbeat_once_seen_is_not_shown_again_by_refresh(lua, direct):
+    """Its last progress stayed on disk, so opened again the panel was quiet
+    but Refresh Progress showed the old crash once more, every time."""
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    write_status(direct, fraction=0.4, updated=time.time())
+    run_file(direct, "log").write_text("RuntimeError: boom\n")
+    run_file(direct, "exit").write_text("1\n")
+    press(H, "RefreshStatusBtn")
+    assert "boom" in H.status() and H.text_of("FolderBtn") == "Open Log"
+    refresh_in_settings(H)
+    assert H.status() == "No run in progress."
+    assert "FolderBtn" in shown(H), "the log went in the session that showed the crash"
+    for _ in range(2):
+        H = load(lua, ui_script(direct))
+        assert shown(H) == MAIN_VIEW
+        refresh_in_settings(H)
+        refresh_in_settings(H)
+        assert H.status() == "No run in progress." and "FolderBtn" not in shown(H)
+    assert run_file(direct, "exit").exists(), "the proof the run ended went"
+
+
+def test_an_unseen_crash_after_a_heartbeat_is_shown_once(lua, direct):
+    """From a run before 0.5.2, which wrote progress, then crashed."""
+    import time
+    write_status(direct, fraction=0.4, updated=time.time() - 60)
+    run_file(direct, "log").write_text("MemoryError\n")
+    run_file(direct, "exit").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert run_tag(direct) == "" and {"Status", "RefreshStatusBtn"} <= shown(H)
+    press(H, "RefreshStatusBtn")
+    assert "MemoryError" in H.status()
+    refresh_in_settings(H)
+    assert H.status() == "No run in progress."
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+    refresh_in_settings(H)
+    assert H.status() == "No run in progress."
+
+
+def as_0_5_1_starts_a_run(root):
+    """What v0.5.1's clear_status does before each run it starts, with the
+    names every run had then."""
+    for kind in ("status", "exit", "stop"):
+        run_file(root, kind, "").unlink(missing_ok=True)
+
+
+def test_a_new_0_5_1_crash_after_one_was_seen_is_shown(lua, direct):
+    """0.5.1 reuses one set of names. A note that the last crash was seen,
+    left where 0.5.1 never clears it, hid the next crash, with the same
+    exit code."""
+    run_file(direct, "log").write_text("ModuleNotFoundError: No module named 'cv2'\n")
+    run_file(direct, "exit").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    press(H, "RefreshStatusBtn")
+    assert "cv2" in H.status()
+    as_0_5_1_starts_a_run(direct)
+    run_file(direct, "log", "").write_text("MemoryError\n")
+    run_file(direct, "exit", "").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert {"Status", "RefreshStatusBtn"} <= shown(H), "the new crash was hidden"
+    press(H, "RefreshStatusBtn")
+    assert "MemoryError" in H.status()
+
+
+def test_a_seen_note_from_an_earlier_build_hides_nothing_and_goes_with_its_run(lua, direct):
+    seen = direct / ".upflow2x_last_run.seen"
+    seen.write_text("")
+    run_file(direct, "log").write_text("MemoryError\n")
+    run_file(direct, "exit").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert {"Status", "RefreshStatusBtn"} <= shown(H), "an old note hid the crash"
+    press(H, "SmoothBtn")
+    assert run_tag(direct) != "" and not seen.exists()
+
+
+def test_a_0_5_1_run_stopped_here_stays_quiet_when_its_exit_code_comes_later(lua, direct):
+    """A 0.5.1 run this panel followed and stopped. Its exit code comes after
+    the panel showed Stopped."""
+    import time
+    write_status(direct, fraction=0.3, updated=time.time())
+    H = load(lua, ui_script(direct))
+    assert run_tag(direct) == "" and H.text_of("CancelBtn") == "Stop"
+    press(H, "CancelBtn")
+    press(H, "CancelBtn")
+    assert run_file(direct, "stop").exists()
+    write_status(direct, fraction=0.3, done=True, ok=False, message="Stopped.",
+                 updated=time.time())
+    press(H, "RefreshStatusBtn")
+    assert H.status() == "Stopped."
+    run_file(direct, "exit").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+    refresh_in_settings(H)
+    assert H.status() == "No run in progress."
+    assert run_file(direct, "status").read_text() == "", "0.5.1 would read more than nothing"
+
+
 AMBER = "#f2a93b"
 
 

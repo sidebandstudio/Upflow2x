@@ -228,9 +228,9 @@ local REVEAL_SCRIPT = join_path(RUN_DIR, ".eternal2x_reveal.cmd")
 --           a Windows command line
 --   script  the command a run starts from on Windows
 --   log     everything the run printed
---   seen    a panel has shown how the run ended, written by the panel. The
---           shell writes the exit code after that, 1 after a Stop, and this
---           keeps a panel opened later from taking it for a failure no one saw
+--   seen    no longer written or read. An earlier build of 0.5.2 noted here
+--           that a panel had shown how the run ended. Named, so it goes with
+--           the run's other files. The status, left empty, says it now
 -- Python finds tmp and stop beside the status, so they follow its name. A
 -- run the panel has given up on can still be writing, and with files of its
 -- own it never writes over, stops or ends the run after it. Tag "" is the one
@@ -1912,11 +1912,22 @@ local function render_location(st)
     return st.import_path
 end
 
--- Marks the run the panel owns as one whose end a panel has shown, among
--- that run's own files, so it goes with them and says nothing of another run.
+-- Marks the run the panel owns as one whose end a panel has shown, by leaving
+-- its status file in place, empty. Every panel, 0.5.1's too, reads an empty
+-- status as none, so it is no progress, render or failure to either, and a
+-- crash's last progress goes with it. The shell writes the exit code later,
+-- 1 after a Stop, and this keeps a panel opened then from taking that for a
+-- failure no one saw. It says nothing of another run: a tagged run's files
+-- are its own, and 0.5.1, which reuses one set of names, deletes the status
+-- before each run it starts.
 local function mark_seen()
-    local f = io.open(run_files(RUN_TAG).seen, "w")
+    local f = io.open(STATUS_PATH, "w")
     if f then f:close() end
+end
+
+-- Whether a panel has shown how the run the panel owns ended.
+local function end_shown()
+    return read_file(STATUS_PATH) == ""
 end
 
 local function apply_status(st)
@@ -1926,9 +1937,8 @@ local function apply_status(st)
     -- every poll it would hide what the panel itself has to say.
     if st.done and st.message ~= "" then set_status(st.message) end
     if st.done then
-        -- Handled now. Left in place, Refresh Progress in a reopened panel
-        -- would import the same render again.
-        os.remove(STATUS_PATH)
+        -- Handled now. Left as it was, Refresh Progress in a reopened panel
+        -- would import the same render again, so it is emptied.
         mark_seen()
         view.recover = nil
         set_busy(false)
@@ -2051,7 +2061,8 @@ local function poll()
     -- Python exited without saying it was done: it could not start, could not
     -- load a package, or crashed. Its last words are the end of the log.
     local why = last_log_line() or ("Python exited with code " .. exited .. ".")
-    -- Shown now, with its log.
+    -- Shown now, with its log. Its exit code proves it ended, so its last
+    -- progress, which would show the crash again, can go.
     mark_seen()
     view.recover = nil
     set_busy(false)
@@ -2198,7 +2209,8 @@ local function claim_status()
     os.remove(aside)
     if not os.rename(STATUS_PATH, aside) then return nil end
     local st = read_status_at(aside)
-    if st and st.done then
+    -- An empty one says a panel showed how the run ended, so it goes back too.
+    if (st and st.done) or read_file(aside) == "" then
         os.rename(aside, STATUS_PATH)
         return st
     end
@@ -2273,8 +2285,7 @@ local function launch(ended, extra, marks)
         RUNS_STARTED = RUNS_STARTED + 1
         tag = string.format("%d-%d-%s", os.time(), RUNS_STARTED,
                             ((tostring({}):gsub("%W", "")):sub(-6)))
-    until not (exists(run_files(tag).status) or exists(run_files(tag).exit)
-               or exists(run_files(tag).seen))
+    until not (exists(run_files(tag).status) or exists(run_files(tag).exit))
     local files = run_files(tag)
     -- Named for the run, so another panel starting one at the same time
     -- never puts its tag in this one's place.
@@ -2694,7 +2705,7 @@ else
         view.recover = "pending"
         set_status(WAITING)
     else
-        local seen = exists(run_files(RUN_TAG).seen)
+        local seen = end_shown()
         if not seen and ((state == "finished" and not waiting.ok and waiting.message ~= "Stopped.")
                 or (state == "gone" and failed)) then
             -- It failed after its panel closed. A successful run leaves exit
