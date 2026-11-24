@@ -352,13 +352,23 @@ local function clip_range(item, props, rate)
     -- used at 60 fps but one past it at 23.976 (20.3.1), so the clip's length
     -- settles it. A retimed clip's length is no guide and keeps the end frame.
     local length = call("GetDuration")
+    local range = nil
     if f1 and length and rate and math.abs(rate - fps) < 0.001 and math.abs(f1 - f0 - length) <= 1 then
-        return { start = start, finish = (f0 + length) / fps }
+        range = { start = start, finish = (f0 + length) / fps }
+    elseif f1 and f1 >= f0 then
+        range = { start = start, finish = (f1 + 1) / fps }
+    else
+        local t0, t1 = call("GetSourceStartTime"), call("GetSourceEndTime")
+        if t0 and t1 and t1 > t0 then range = { start = start, finish = start + (t1 - t0) } end
     end
-    if f1 and f1 >= f0 then return { start = start, finish = (f1 + 1) / fps } end
-    local t0, t1 = call("GetSourceStartTime"), call("GetSourceEndTime")
-    if t0 and t1 and t1 > t0 then return { start = start, finish = start + (t1 - t0) } end
-    return nil
+    -- Every clip has a range, so the panel only calls one trimmed that starts
+    -- after the file's first frame, or ends before its last where Resolve
+    -- says how many frames the file has.
+    if range then
+        local frames = tonumber(tostring(props["Frames"] or ""):match("^%s*(%d+)"))
+        range.trimmed = f0 > 0 or (frames ~= nil and range.finish < (frames - 0.5) / fps)
+    end
+    return range
 end
 
 -- A file's name without its folder or extension.
@@ -901,16 +911,10 @@ local TITLE = themed("QLabel { font-size: 17px; font-weight: 600; color: $text; 
 local BADGE = themed([[QLabel { background-color: $amber; color: $on_amber; border-radius: 4px;
     padding: 1px 5px; font-family: Consolas, Menlo, monospace; font-size: 10px; font-weight: 700; }]])
 local VERSION = themed("QLabel { color: $soft; font-size: 11px; }")
--- A group's name, and on its right what to know about it, over one hairline,
--- as the Inspector heads its groups.
-local SECTION = themed([[QLabel { color: $text; font-size: 11px; font-weight: 700;
-    padding: 0px 0px 3px 0px; border-bottom: 1px solid $line; }]])
-local SECTION_NOTE = themed([[QLabel { color: $soft; font-size: 11px;
-    padding: 0px 0px 3px 0px; border-bottom: 1px solid $line; }]])
 local INFO = themed([[QLabel { color: $soft; border: 1px solid $line; border-radius: 8px;
     font-family: Georgia, serif; font-size: 10px; font-weight: 700; }]])
-local CARD = themed([[QLabel { background-color: $field; border: 1px solid $hair;
-    border-radius: 6px; padding: 7px 10px; color: $text; font-size: 12px; }]])
+-- The clip's name, plain under the title.
+local SOURCE = themed("QLabel { color: $text; font-size: 12px; }")
 local NOTE = themed("QLabel { color: $soft; font-size: 11px; }")
 -- What a switch does to the render, under it.
 local MODE = themed("QLabel { color: $soft; font-size: 11px; padding: 0px 2px; }")
@@ -1020,133 +1024,127 @@ local TIPS = {
     folder = "Where renders are saved, a folder for each project. By default that's an Upflow2x folder beside the project's Resolve cache, or Resolve's own folder. Choose a folder to keep them somewhere else, like a drive with more space.",
 }
 
-local function info(tip, id)
-    return ui:Label{ ID = id, Text = "i", ToolTip = tip, StyleSheet = INFO, Weight = 0,
-                     Alignment = { AlignCenter = true },
-                     MinimumSize = { 16, 16 }, MaximumSize = { 16, 16 } }
-end
-
--- Name, control, (i): the same three columns on every row.
-local function row(name, control, tip)
+-- A Settings row: its name, then its control. The name carries the tip.
+local function row(id, name, control, tip)
     return ui:HGroup{ Weight = 0, Spacing = 8,
-        ui:Label{ Text = name, StyleSheet = FIELD_LABEL, Weight = 0.2,
-                  Alignment = { AlignLeft = true, AlignVCenter = true } },
+        ui:Label{ ID = id, Text = name, StyleSheet = FIELD_LABEL, Weight = 0.25, ToolTip = tip,
+                  Hidden = true, Alignment = { AlignLeft = true, AlignVCenter = true } },
         control,
-        info(tip),
     }
 end
 
--- A group's heading: its name, and on the right a word on how it is used.
-local function heading(id, name, note)
-    return ui:HGroup{ Weight = 0, Spacing = 0,
-        ui:Label{ ID = id, Text = name, StyleSheet = SECTION, Weight = 1,
-                  Alignment = { AlignLeft = true, AlignBottom = true } },
-        ui:Label{ ID = id .. "Note", Text = note or "", StyleSheet = SECTION_NOTE, Weight = 0,
-                  Alignment = { AlignRight = true, AlignBottom = true } },
-    }
-end
-
--- Under a switch, what it does to the render, in words show_modes writes.
--- Two lines, for a narrow window or a larger font.
+-- Under a switch, whether it is on and what that does, in words show_modes writes.
 local function mode_line(id, tip)
-    return ui:Label{ ID = id, Text = "", StyleSheet = MODE, WordWrap = true, ToolTip = tip,
-                     Weight = 0, MinimumSize = { 0, 28 },
-                     Alignment = { AlignHCenter = true, AlignTop = true } }
+    return ui:Label{ ID = id, Text = "", StyleSheet = MODE, ToolTip = tip, Weight = 0,
+                     MinimumSize = { 0, 16 }, Alignment = { AlignHCenter = true, AlignTop = true } }
 end
 
--- The groups top to bottom in the order you use them: the clip, how its
--- drawings are found, how it renders, then Render and how the run goes.
--- Rows sit closer inside a group than the groups do to each other. All in one
--- window, so nothing opens on top of it.
+-- Two pages in one window, so nothing opens on top of it. The main page is
+-- what a render needs: the clip, the two switches and Render. Settings holds
+-- the rest, behind a button in the title row that becomes Back there. The
+-- title row and the clip's name show on both, and so does how a run is
+-- going, under either page, so a run started from Settings stays in sight.
+-- Each widget a page or a run shows or hides has an ID, as only those can
+-- be reached once the window is built. They start as the main page shows
+-- them, so nothing flashes as it opens.
 local win = disp:AddWindow({
     ID = "Eternal2x",
     WindowTitle = "Upflow2x  v" .. CURRENT_VERSION,
-    Geometry = { 100, 100, 380, 620 },
+    Geometry = { 100, 100, 380, 198 },
     StyleSheet = WINDOW,
 }, ui:VGroup{
     Spacing = 10,
 
     ui:HGroup{ Weight = 0, Spacing = 6,
         ui:Label{ ID = "Title", Text = "Upflow", StyleSheet = TITLE, Weight = 0 },
+        -- Held to its own height, or it stretches to the Settings button's.
         ui:Label{ ID = "Badge", Text = "2X", StyleSheet = BADGE, Weight = 0,
-                  Alignment = { AlignCenter = true } },
+                  Alignment = { AlignCenter = true }, MaximumSize = { 16777215, 18 } },
         ui:HGap(0, 1),
-        ui:Label{ ID = "SubTitle", Text = "v" .. CURRENT_VERSION, StyleSheet = VERSION, Weight = 0,
+        ui:Button{ ID = "SettingsBtn", Text = "Settings", StyleSheet = BUTTON, Weight = 0,
+                   ToolTip = "Analyse, threshold, output, where renders are saved, and updates." },
+        ui:Button{ ID = "BackBtn", Text = "Back", StyleSheet = BUTTON, Weight = 0, Hidden = true,
+                   ToolTip = "Back to Render. Settings are saved as you change them." },
+    },
+
+    ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = SOURCE,
+              WordWrap = true, MinimumSize = { 0, 18 }, ToolTip = TIPS.clip, Weight = 0 },
+
+    -- The main page.
+    ui:HGroup{ Weight = 0, Spacing = 8,
+        ui:VGroup{ Weight = 1, Spacing = 4,
+            ui:Button{ ID = "UpscaleCB", Text = "Upscaling", Checkable = true, Checked = DO_UPSCALE,
+                       StyleSheet = TOGGLE, ToolTip = TIPS.upscale, Weight = 0 },
+            mode_line("UpscaleMode", TIPS.upscale),
+        },
+        ui:VGroup{ Weight = 1, Spacing = 4,
+            ui:Button{ ID = "InterpCB", Text = "Interpolate", Checkable = true,
+                       Checked = DO_INTERPOLATE, StyleSheet = TOGGLE, ToolTip = TIPS.interp,
+                       Weight = 0 },
+            mode_line("InterpMode", TIPS.interp),
+        },
+    },
+    ui:Button{ ID = "SmoothBtn", Text = RENDER_LABEL, StyleSheet = START, ToolTip = TIPS.render,
+               Weight = 0, MinimumSize = { 0, 44 }, MaximumSize = { 16777215, 44 } },
+
+    -- Settings. Analyse and the threshold it uses share a row. Render finds
+    -- the drawings itself on a clip with no markers, so neither is needed.
+    ui:HGroup{ Weight = 0, Spacing = 8,
+        ui:Button{ ID = "AnalyseBtn", Text = "Analyse", StyleSheet = BUTTON, ToolTip = TIPS.detection,
+                   Weight = 0, MinimumSize = { 84, 0 }, Hidden = true },
+        ui:Label{ ID = "ThresholdLabel", Text = "Threshold", StyleSheet = FIELD_LABEL, Weight = 0,
+                  ToolTip = TIPS.threshold, Hidden = true,
                   Alignment = { AlignRight = true, AlignVCenter = true } },
-        ui:Button{ ID = "UpdateBtn", Text = "Check for Updates", StyleSheet = LINK, Weight = 0 },
-        info(TIPS.needs, "NeedsInfo"),
+        ui:Slider{ ID = "ThresholdSlider", Weight = 1, Minimum = 1, Maximum = 9, PageStep = 1,
+                   Value = THRESHOLD, Orientation = "Horizontal", ToolTip = TIPS.threshold,
+                   Hidden = true },
+        ui:Label{ ID = "ThresholdValue", Text = tostring(THRESHOLD), StyleSheet = FIELD_LABEL,
+                  Weight = 0, MinimumSize = { 10, 0 }, Hidden = true,
+                  Alignment = { AlignRight = true, AlignVCenter = true } },
+    },
+    ui:Label{ ID = "AnalysisLabel", Text = ANALYSIS_HINT, StyleSheet = NOTE, WordWrap = true,
+              Weight = 0, Hidden = true },
+    row("OutputLabel", "Output", ui:ComboBox{ ID = "FormatCombo", Weight = 0.75, Hidden = true,
+                                              ToolTip = TIPS.format }, TIPS.format),
+    row("FolderLabel", "Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.75, Hidden = true },
+        TIPS.folder),
+    ui:HGroup{ Weight = 0, Spacing = 8,
+        ui:Label{ ID = "SubTitle", Text = "Upflow2x v" .. CURRENT_VERSION, StyleSheet = VERSION,
+                  Weight = 0, Hidden = true, Alignment = { AlignLeft = true, AlignVCenter = true } },
+        ui:Label{ ID = "NeedsInfo", Text = "i", ToolTip = TIPS.needs, StyleSheet = INFO, Weight = 0,
+                  Hidden = true, Alignment = { AlignCenter = true },
+                  MinimumSize = { 16, 16 }, MaximumSize = { 16, 16 } },
+        ui:HGap(0, 1),
+        ui:Button{ ID = "UpdateBtn", Text = "Check for Updates", StyleSheet = BUTTON, Weight = 0,
+                   Hidden = true },
     },
 
-    ui:VGroup{ Weight = 0, Spacing = 6,
-        heading("ClipHeading", "Clip"),
-        ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = CARD,
-                  WordWrap = true, MinimumSize = { 0, 46 }, ToolTip = TIPS.clip, Weight = 0 },
+    -- How a run is going, under either page, each part only while it has
+    -- something to say.
+    ui:Label{ ID = "ProgressBar", Text = "", StyleSheet = bar_style(nil), Weight = 0, Hidden = true,
+              MinimumSize = { 0, 4 }, MaximumSize = { 16777215, 4 } },
+    -- Two lines while a run goes, set by set_busy.
+    ui:Label{ ID = "Progress", Text = "", StyleSheet = PROGRESS, WordWrap = true, Weight = 0,
+              Hidden = true, MinimumSize = { 0, 16 } },
+    -- As tall as its message, set by set_status. Resolve does not grow a
+    -- wrapped label to fit, so a finished render's message was cut off top
+    -- and bottom.
+    ui:Label{ ID = "Status", Text = "Ready.", StyleSheet = STATUS, WordWrap = true, Weight = 0,
+              Hidden = true, MinimumSize = { 0, 17 },
+              Alignment = { AlignLeft = true, AlignTop = true } },
+    ui:HGroup{ Weight = 0, Spacing = 2,
+        ui:Button{ ID = "CompareBtn", Text = "Show Original", StyleSheet = LINK, Enabled = false, Weight = 0,
+                   Hidden = true,
+                   ToolTip = "Switch the render off and on to compare it with the original under it." },
+        ui:Button{ ID = "FolderBtn", Text = "Show in Folder", StyleSheet = LINK, Enabled = false, Weight = 0,
+                   Hidden = true, ToolTip = "Open the folder the render was saved to." },
+        ui:HGap(0, 1),
+        ui:Button{ ID = "RefreshStatusBtn", Text = "Refresh Progress", StyleSheet = LINK, Weight = 0,
+                   Hidden = true, ToolTip = "Read how far the run has got, if the panel stopped updating." },
+        ui:Button{ ID = "CancelBtn", Text = "Reset", StyleSheet = LINK, Weight = 0, Hidden = true,
+                   ToolTip = "Clear a run that stopped without finishing." },
     },
-
-    -- Analyse and the threshold it uses share a row. Render finds the
-    -- drawings itself on a clip with no markers, so this group is optional.
-    ui:VGroup{ Weight = 0, Spacing = 6,
-        heading("DrawingsHeading", "Drawings", "Optional"),
-        ui:HGroup{ Weight = 0, Spacing = 8,
-            ui:Button{ ID = "AnalyseBtn", Text = "Analyse", StyleSheet = BUTTON, ToolTip = TIPS.detection,
-                       Weight = 0, MinimumSize = { 84, 0 } },
-            ui:Label{ Text = "Threshold", StyleSheet = FIELD_LABEL, Weight = 0, ToolTip = TIPS.threshold,
-                      Alignment = { AlignRight = true, AlignVCenter = true } },
-            ui:Slider{ ID = "ThresholdSlider", Weight = 1, Minimum = 1, Maximum = 9, PageStep = 1,
-                       Value = THRESHOLD, Orientation = "Horizontal", ToolTip = TIPS.threshold },
-            ui:Label{ ID = "ThresholdValue", Text = tostring(THRESHOLD), StyleSheet = FIELD_LABEL,
-                      Weight = 0, MinimumSize = { 10, 0 },
-                      Alignment = { AlignRight = true, AlignVCenter = true } },
-            info(TIPS.threshold),
-        },
-        ui:Label{ ID = "AnalysisLabel", Text = ANALYSIS_HINT, StyleSheet = NOTE, WordWrap = true,
-                  Weight = 0 },
-    },
-
-    ui:VGroup{ Weight = 0, Spacing = 6,
-        heading("RenderHeading", "Render settings"),
-        ui:HGroup{ Weight = 0, Spacing = 8,
-            ui:VGroup{ Weight = 1, Spacing = 4,
-                ui:Button{ ID = "UpscaleCB", Text = "Upscaling", Checkable = true, Checked = DO_UPSCALE,
-                           StyleSheet = TOGGLE, ToolTip = TIPS.upscale, Weight = 0 },
-                mode_line("UpscaleMode", TIPS.upscale),
-            },
-            ui:VGroup{ Weight = 1, Spacing = 4,
-                ui:Button{ ID = "InterpCB", Text = "Interpolate", Checkable = true,
-                           Checked = DO_INTERPOLATE, StyleSheet = TOGGLE, ToolTip = TIPS.interp,
-                           Weight = 0 },
-                mode_line("InterpMode", TIPS.interp),
-            },
-        },
-        row("Output", ui:ComboBox{ ID = "FormatCombo", Weight = 0.8 }, TIPS.format),
-        row("Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.8 }, TIPS.folder),
-    },
-
-    ui:VGroup{ Weight = 0, Spacing = 6,
-        ui:Button{ ID = "SmoothBtn", Text = RENDER_LABEL, StyleSheet = START, ToolTip = TIPS.render,
-                   Weight = 0, MinimumSize = { 0, 44 }, MaximumSize = { 16777215, 44 } },
-        ui:Label{ ID = "ProgressBar", Text = "", StyleSheet = bar_style(nil), Weight = 0,
-                  MinimumSize = { 0, 4 }, MaximumSize = { 16777215, 4 } },
-        ui:Label{ ID = "Progress", Text = "", StyleSheet = PROGRESS, WordWrap = true, Weight = 0 },
-        -- Five lines, as long as a finished render's message runs with the
-        -- import's notes after it. Resolve does not grow a wrapped label to
-        -- fit, and three lines cut that off top and bottom. Held to the top,
-        -- so a short message sits under the progress, not in the middle.
-        ui:Label{ ID = "Status", Text = "Ready.", StyleSheet = STATUS, WordWrap = true, Weight = 0,
-                  MinimumSize = { 0, 76 }, Alignment = { AlignLeft = true, AlignTop = true } },
-        ui:HGroup{ Weight = 0, Spacing = 2,
-            ui:Button{ ID = "CompareBtn", Text = "Show Original", StyleSheet = LINK, Enabled = false, Weight = 0,
-                       ToolTip = "Switch the render off and on to compare it with the original under it." },
-            ui:Button{ ID = "FolderBtn", Text = "Show in Folder", StyleSheet = LINK, Enabled = false, Weight = 0,
-                       ToolTip = "Open the folder the render was saved to." },
-            ui:HGap(0, 1),
-            ui:Button{ ID = "RefreshStatusBtn", Text = "Refresh Progress", StyleSheet = LINK, Weight = 0,
-                       ToolTip = "Read how far the run has got, if the panel stopped updating." },
-            ui:Button{ ID = "CancelBtn", Text = "Reset", StyleSheet = LINK, Weight = 0,
-                       ToolTip = "Clear a run that stopped without finishing." },
-        },
-        ui:Label{ ID = "Meta", Text = "", StyleSheet = META, WordWrap = true, Weight = 0 },
-    },
+    ui:Label{ ID = "Meta", Text = "", StyleSheet = META, WordWrap = true, Weight = 0, Hidden = true },
     -- Any height the window has to spare goes here, below everything.
     ui:VGap(0, 1),
 })
@@ -1173,17 +1171,18 @@ local function fill_folders()
 end
 fill_folders()
 
--- What each switch does to the render, in the words under it, read from the
--- switch itself so a setting restored from the config shows too. It says no
--- more than the flags current_args sends: Upscaling asks for a 2x render
--- from Real-ESRGAN, which needs a GPU. Without one the file stays at its own
--- size and Super Scale is set on the imported clip. Interpolate on draws the
--- in-betweens into a render three times as long, and off keeps the timing.
+-- Under each switch, On or Off and what that does, read from the switch
+-- itself so a setting restored from the config shows too. Upscaling asks for
+-- a 2x upscale, drawn by Real-ESRGAN where it can run and left to Super
+-- Scale where it cannot, so the words name the factor, not a file size or a
+-- GPU. Interpolate on makes the render three times as long, and off keeps
+-- the clip's length. The tips say the rest.
+local DOT = " \xC2\xB7 "
 local function show_modes()
-    items.UpscaleMode.Text = items.UpscaleCB.Checked
-        and "On: 2x via DirectML or Super Scale" or "Off: original resolution"
-    items.InterpMode.Text = items.InterpCB.Checked
-        and "On: 3x longer, in-betweens drawn" or "Off: original timing"
+    items.UpscaleMode.Text = items.UpscaleCB.Checked and ("On" .. DOT .. "2x")
+        or ("Off" .. DOT .. "original size")
+    items.InterpMode.Text = items.InterpCB.Checked and ("On" .. DOT .. "3x longer")
+        or ("Off" .. DOT .. "same length")
 end
 show_modes()
 
@@ -1214,11 +1213,119 @@ local ANALYSING = false
 -- picked up from an earlier panel, since nothing says which that is.
 local RUN_KIND = nil
 
-local function set_status(msg)
-    items.Status.Text = msg or ""
+-- The window: which page it shows, what shows on it, kept here rather than
+-- read back, and how tall the labels that wrap are.
+--   page      "main" or "settings"
+--   timed     whether a timer drives the panel. Without one, Refresh Progress
+--             is the only way the clip and a run are read again, so it always
+--             shows. Set once the timer is made
+--   changed   something was shown or hidden, or a label's height changed
+--   fit_again ask for the window's height once more on the next tick
+local view = {
+    page = "main", timed = false, changed = false, fit_again = false,
+    source_height = 18, status_height = 17, progress_height = 16,
+    -- What each page shows. Everything else shows on both, or as a run needs it.
+    main = { "SettingsBtn", "UpscaleCB", "UpscaleMode", "InterpCB", "InterpMode", "SmoothBtn" },
+    settings = { "BackBtn", "AnalyseBtn", "ThresholdLabel", "ThresholdSlider", "ThresholdValue",
+                 "AnalysisLabel", "OutputLabel", "FormatCombo", "FolderLabel", "FolderCombo",
+                 "SubTitle", "NeedsInfo", "UpdateBtn" },
+    feedback = { "ProgressBar", "Progress", "Status", "CompareBtn", "FolderBtn",
+                 "RefreshStatusBtn", "CancelBtn", "Meta" },
+    shown = {},
+}
+for _, id in ipairs(view.main) do view.shown[id] = true end
+for _, id in ipairs(view.settings) do view.shown[id] = false end
+for _, id in ipairs(view.feedback) do view.shown[id] = false end
+
+-- How many lines `text` wraps to at about `per_line` characters a line, for
+-- labels Resolve does not grow to fit. A guess on the high side, as a spare
+-- line costs less than a cut one.
+local function lines_of(text, per_line)
+    local lines = 0
+    for part in ((text or "") .. "\n"):gmatch("([^\n]*)\n") do
+        lines = lines + math.max(1, math.ceil(#part / per_line))
+    end
+    return math.max(1, lines)
+end
+
+-- A window keeps its size when what it shows gets smaller, so after a change
+-- it is asked for the height it needs. The heights are in pixels, measured
+-- on an offscreen render of these style sheets at 380 wide. Where one comes
+-- out short, Qt keeps the window as tall as its layout needs. Qt lays a
+-- window out on its next pass, and may hold it at the old height until
+-- then, so with a timer the ask is made once more on the next tick. Nothing
+-- else resizes it, so its size never moves while a run only reports progress.
+local function fit_window()
+    local shown, gap = view.shown, 10
+    local height = (view.page == "settings" and 264 or 198) + view.source_height - 18
+    if shown.Progress then height = height + 4 + view.progress_height + 2 * gap end
+    if shown.Status then height = height + view.status_height + gap end
+    if shown.CompareBtn or shown.FolderBtn or shown.RefreshStatusBtn or shown.CancelBtn then
+        height = height + 22 + gap
+    end
+    if shown.Meta then height = height + lines_of(items.Meta.Text, 56) * 15 + gap end
+    local width = 380
+    pcall(function() width = tonumber(win:Size()[1]) or width end)
+    pcall(function() win:Resize({ width, height }) end)
+    view.fit_again = view.timed
+end
+
+-- Shows the page's controls, and of how a run is going only what has
+-- something to say: the bar while there is progress, a message other than
+-- Ready, or one the clip's line, or in Settings the analysis line, already
+-- says, unless it answers a press, Show Original and Show in Folder once
+-- they have a render, Stop while a run goes, and Refresh Progress while a
+-- run goes, without a timer, or when a message asks for it.
+local function show_what_matters()
+    local function set(id, shown)
+        if view.shown[id] ~= shown then
+            view.shown[id] = shown
+            items[id].Hidden = not shown
+            view.changed = true
+        end
+    end
+    local settings = view.page == "settings"
+    for _, id in ipairs(view.main) do set(id, not settings) end
+    for _, id in ipairs(view.settings) do set(id, settings) end
+    local progress = (items.Progress.Text or "") ~= ""
+    set("ProgressBar", progress)
+    set("Progress", progress)
+    local said = items.Status.Text or ""
+    set("Status", said ~= "" and said ~= "Ready."
+        and (said ~= items.SourceLabel.Text or said == view.answer)
+        and not (settings and said == items.AnalysisLabel.Text))
+    set("CompareBtn", items.CompareBtn.Enabled == true)
+    set("FolderBtn", items.FolderBtn.Enabled == true)
+    set("CancelBtn", RUNNING)
+    set("RefreshStatusBtn", RUNNING or not view.timed or said:find("Refresh Progress", 1, true) ~= nil)
+    set("Meta", (items.Meta.Text or "") ~= "")
+    if view.changed then
+        view.changed = false
+        fit_window()
+    end
+end
+
+-- With answer, the message answers a press, and shows even when the clip's
+-- line already says it.
+local function set_status(msg, answer)
+    msg = msg or ""
+    view.answer = answer and msg or nil
+    items.Status.Text = msg
     -- The whole message, for one too long for the box.
-    items.Status.ToolTip = msg or ""
-    print("[Upflow2x] " .. (msg or ""))
+    items.Status.ToolTip = msg
+    local height = lines_of(msg, 56) * 15 + 2
+    if view.status_height ~= height then
+        view.status_height = height
+        items.Status.MinimumSize = { 0, height }
+        view.changed = true
+    end
+    print("[Upflow2x] " .. msg)
+    show_what_matters()
+end
+
+local function set_meta(text)
+    items.Meta.Text = text or ""
+    show_what_matters()
 end
 
 -- A stage at 0% is still shown: installing the AI runtime on first use stays
@@ -1227,11 +1334,13 @@ local function set_progress(fraction, stage)
     if not fraction or (fraction <= 0 and (stage or "") == "") then
         items.Progress.Text = ""
         items.ProgressBar.StyleSheet = bar_style(nil)
+        show_what_matters()
         return
     end
     fraction = math.min(1, fraction)
     items.ProgressBar.StyleSheet = bar_style(fraction)
     items.Progress.Text = string.format("%d%%  %s", math.floor(fraction * 100 + 0.5), stage or "")
+    show_what_matters()
 end
 
 -- Stop takes two presses. A render stopped partway deletes the frames it has
@@ -1262,6 +1371,15 @@ local function set_busy(busy)
         or "Clear a run that stopped without finishing."
     STOP_ASKED = nil
     items.CancelBtn.StyleSheet = LINK
+    -- Two lines while a run goes, so a stage name that wraps does not move
+    -- everything under it on a tick, and one once it has ended.
+    local progress_height = busy and 30 or 16
+    if view.progress_height ~= progress_height then
+        view.progress_height = progress_height
+        items.Progress.MinimumSize = { 0, progress_height }
+        view.changed = true
+    end
+    show_what_matters()
 end
 
 -- After a run fails, Show in Folder becomes Open Log. The log says why it
@@ -1276,6 +1394,7 @@ local function offer_log(on)
         and ("Open the log of the run that failed, to read it or send it in.\n" .. LOG_PATH)
         or "Open the folder the render was saved to."
     items.FolderBtn.Enabled = SHOW_LOG or LAST_OUTPUT ~= nil
+    show_what_matters()
 end
 
 -- Seconds as text that Python's float() reads, whatever the locale.
@@ -1283,27 +1402,52 @@ local function seconds(value)
     return (string.format("%.6f", value):gsub(",", "."))
 end
 
+-- The part of the file a trimmed clip uses. nil for a clip that uses all of
+-- it, or when Resolve does not say, since every clip has a range.
 local function range_text(range)
-    if not range then return "Whole file." end
-    return (string.format("%.2f s long, from %.2f s of the file.",
-                          range.finish - range.start, range.start)
+    if not (range and range.trimmed) then return nil end
+    return (string.format("Trimmed: %.2f to %.2f s", range.start, range.finish)
             :gsub("(%d),(%d)", "%1.%2"))
 end
 
 -- The timer reads the clip twice a second, and a tip set again closes under
--- the pointer, so the card is only written when it changes.
+-- the pointer, so the line is only written when it changes. It is as tall as
+-- its text, as Resolve does not grow a wrapped label to fit.
 local function show_source(text, tip)
-    if items.SourceLabel.Text ~= text then items.SourceLabel.Text = text end
+    if items.SourceLabel.Text ~= text then
+        items.SourceLabel.Text = text
+        local height = lines_of(text, 52) * 16 + 2
+        if view.source_height ~= height then
+            view.source_height = height
+            items.SourceLabel.MinimumSize = { 0, height }
+            view.changed = true
+        end
+        show_what_matters()
+    end
     if items.SourceLabel.ToolTip ~= tip then items.SourceLabel.ToolTip = tip end
 end
 
--- With keep, a playhead in a gap leaves the last clip, and the card, as they are.
+-- With keep, a playhead in a gap leaves the last clip, marked as kept.
 local function refresh_source(keep)
+    -- The clip's name, and a second line only when there is more to know:
+    -- that it is the last clip used, kept while the playhead is off every
+    -- clip, so it is not taken for the clip under the playhead, and which
+    -- part a trimmed clip uses.
+    local function source_text(path, range, kept)
+        local notes = {}
+        if kept then notes[#notes + 1] = "Last usable clip" end
+        notes[#notes + 1] = range_text(range)
+        local name = short_name(basename(path))
+        if #notes == 0 then return name end
+        return name .. "\n" .. table.concat(notes, DOT)
+    end
     local path, err, range, place, item = selected_clip_path()
-    local origin = path and "From playhead" or (keep and SOURCE_PATH and "Last usable clip" or "")
-    if items.ClipHeadingNote.Text ~= origin then items.ClipHeadingNote.Text = origin end
     if not path then
-        if keep and SOURCE_PATH then return false end
+        if keep and SOURCE_PATH then
+            show_source(source_text(SOURCE_PATH, SOURCE_RANGE, true),
+                        TIPS.clip .. "\n\n" .. SOURCE_PATH)
+            return false
+        end
         SOURCE_PATH = nil
         SOURCE_RANGE = nil
         SOURCE_PLACE = nil
@@ -1325,7 +1469,7 @@ local function refresh_source(keep)
     SOURCE_RANGE = range
     SOURCE_PLACE = place
     SOURCE_ITEM = item
-    show_source(short_name(basename(path)) .. "\n" .. range_text(range), TIPS.clip .. "\n\n" .. path)
+    show_source(source_text(path, range, false), TIPS.clip .. "\n\n" .. path)
     return true
 end
 
@@ -1812,10 +1956,10 @@ local function apply_status(st)
             if ok then
                 set_status(st.message .. " " .. notes)
                 -- Three lines of status leave no room for a tip as well.
-                if hint then items.Meta.Text = hint end
+                if hint then set_meta(hint) end
             elseif where then
                 -- The status box fits three lines, too few for a path as well.
-                items.Meta.Text = short_path(where, 68)
+                set_meta(short_path(where, 68))
                 print("[Upflow2x] The render is at " .. where)
                 set_status(st.message .. " " .. notes .. " Drag it in from the path below.")
             else
@@ -1938,6 +2082,9 @@ end
 local pick_source
 local last_spot = nil
 local function on_timeout(ev)
+    -- Once, the tick after a change, by when Qt has laid the window out.
+    if view.fit_again then fit_window() end
+    view.fit_again = false
     if RUNNING then
         poll()
         return
@@ -1956,6 +2103,7 @@ if have_timer and timer then
     pcall(function() win:AddChild(timer) end)
     pcall(function() disp.On.Timeout = on_timeout end)
     pcall(function() win.On.PollTimer.Timeout = on_timeout end)
+    view.timed = true
 end
 
 local function start_polling()
@@ -2128,12 +2276,28 @@ function win.On.Eternal2x.Close(ev)
     disp:ExitLoop()
 end
 
+-- Settings and Back only change the page. Every setting is saved as it
+-- changes, so leaving starts nothing. Focus goes to the button that leads
+-- back, for whoever moves through the panel with the keyboard.
+function win.On.SettingsBtn.Clicked(ev)
+    view.page = "settings"
+    show_what_matters()
+    pcall(function() items.BackBtn:SetFocus("OtherFocusReason") end)
+end
+
+function win.On.BackBtn.Clicked(ev)
+    view.page = "main"
+    show_what_matters()
+    pcall(function() items.SettingsBtn:SetFocus("OtherFocusReason") end)
+end
+
 -- Work on the clip under the playhead now, not the one there when the panel
 -- opened. If the playhead has moved off every clip, keep the last one.
 -- With quiet, as the timer calls it, a gap says nothing.
 function pick_source(quiet)
     if refresh_source(true) or SOURCE_PATH then return true end
-    if not quiet then set_status(items.SourceLabel.Text) end
+    -- An answer to a press shows, though the clip's line says it too.
+    if not quiet then set_status(items.SourceLabel.Text, true) end
     return false
 end
 
@@ -2165,9 +2329,10 @@ function win.On.AnalyseBtn.Clicked(ev)
     STAGE.name = nil
     set_busy(true)
     set_progress(0.01, "Starting")
-    set_status("Analysing...")
+    -- The analysis line first, so the status knows it would only repeat it.
     items.AnalysisLabel.Text = "Analysing..."
     items.AnalysisLabel.ToolTip = ""
+    set_status("Analysing...")
 end
 
 function win.On.SmoothBtn.Clicked(ev)
@@ -2434,7 +2599,7 @@ end
 win:Show()
 
 if REPO_ROOT == "" then
-    items.Meta.Text = "Plugin folder not configured."
+    set_meta("Plugin folder not configured.")
     set_status("Run Installer/install_upflow2x.py, then restart Resolve.")
 else
     refresh_source()

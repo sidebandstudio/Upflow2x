@@ -49,8 +49,10 @@ local function collect(widget, out)
 end
 
 -- UIManager: ui:VGroup{...}, ui:Label{...} etc. all just build descriptors.
+-- H.no_timer models a Resolve build without ui:Timer.
 local ui = setmetatable({}, {
     __index = function(_, kind)
+        if kind == "Timer" and H.no_timer then error("no ui:Timer on this build") end
         return function(_self, spec, ...)
             -- ui:VGap(size) and ui:HGap(size, weight) take numbers.
             local gap = type(spec) ~= "table" and { spec, ... } or nil
@@ -103,6 +105,13 @@ function dispatcher:AddWindow(attrs, layout)
     function win:GetItems() return items end
     function win:Show() self.__shown = true end
     function win:Hide() self.__shown = false end
+    -- Every size the panel asks the window for, in H.resizes, and the last.
+    H.resizes, H.size = {}, nil
+    function win:Resize(size)
+        H.resizes[#H.resizes + 1] = { size[1], size[2] }
+        H.size = { size[1], size[2] }
+    end
+    function win:Size() return H.size or { attrs.Geometry[3], attrs.Geometry[4] } end
     function win:AddChild(child)
         if child and child.ID then items[child.ID] = child end
         table.insert(self.__extra, child)
@@ -153,7 +162,8 @@ end
 function H.make_resolve(clip_file_path)
     local mpi = {
         GetClipProperty = function(_self)
-            return { ["File Path"] = H.clip_file or clip_file_path, FPS = H.clip_fps or "24" }
+            return { ["File Path"] = H.clip_file or clip_file_path, FPS = H.clip_fps or "24",
+                     Frames = H.clip_frames }
         end,
     }
     local item = { GetMediaPoolItem = function(_self) return mpi end }

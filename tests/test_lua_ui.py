@@ -316,51 +316,205 @@ def test_a_byte_order_mark_in_version_does_not_leak_into_the_title(lua, direct):
 
 
 # --------------------------------------------------------------------------
-# how the panel reads: its groups, the switches' words, focus and contrast
+# what shows: the main view, Settings, and how a run is going
 # --------------------------------------------------------------------------
 
-def widget_order(lua, H):
-    """The window's widgets with an ID, top to bottom, and for each one the
-    group it sits in, numbered as the groups are met."""
-    walk = lua.eval("""function(H)
-        local ids, parent, groups = {}, {}, 0
-        local function walk(node, group)
-            if node.ID then
-                ids[#ids + 1] = node.ID
-                parent[node.ID] = group
-            end
-            if node.__kind == "VGroup" or node.__kind == "HGroup" then
-                groups = groups + 1
-                group = groups
-            end
-            for _, child in ipairs(node.__children or {}) do walk(child, group) end
-        end
-        walk(H.window.__layout, 0)
-        return table.concat(ids, ","), parent
-    end""")
-    ids, parent = walk(H)
-    return ids.split(","), parent
+MAIN_VIEW = {"Title", "Badge", "SettingsBtn", "SourceLabel", "UpscaleCB", "UpscaleMode",
+             "InterpCB", "InterpMode", "SmoothBtn"}
+SETTINGS_VIEW = {"Title", "Badge", "BackBtn", "SourceLabel", "AnalyseBtn", "ThresholdLabel",
+                 "ThresholdSlider", "ThresholdValue", "AnalysisLabel", "OutputLabel",
+                 "FormatCombo", "FolderLabel", "FolderCombo", "SubTitle", "NeedsInfo",
+                 "UpdateBtn"}
+FEEDBACK = {"ProgressBar", "Progress", "Status", "CompareBtn", "FolderBtn",
+            "RefreshStatusBtn", "CancelBtn", "Meta"}
 
 
-def test_the_panel_reads_as_clip_drawings_settings_then_render(lua, direct):
-    """Everything sat in one column with one hairline. It reads as the
-    Inspector does now: the clip, how its drawings are found, how it renders,
-    then Render with how the run goes under it."""
+def shown(H):
+    """The IDs of the widgets the window shows."""
+    return {i for i in H.widget_ids().split(",") if H.widgets[i].Hidden is not True}
+
+
+def words(H):
+    """The words the window shows, buttons included, as a person reads them."""
+    out = []
+    for i in shown(H):
+        text = H.widgets[i].Text
+        out += [w for w in str(text or "").split() if any(c.isalnum() for c in w)]
+    return out
+
+
+def test_the_main_view_is_the_clip_two_switches_and_render(lua, direct):
+    """It held every control, three headings, info dots, the version and a
+    tall empty status box. Idle, it shows what a render needs, in 12 words."""
     H = load(lua, ui_script(direct))
-    order, parent = widget_order(lua, H)
-    expected = ["ClipHeading", "SourceLabel", "DrawingsHeading", "AnalyseBtn", "ThresholdSlider",
-                "AnalysisLabel", "RenderHeading", "UpscaleCB", "UpscaleMode", "InterpCB",
-                "InterpMode", "FormatCombo", "FolderCombo", "SmoothBtn", "ProgressBar",
-                "Progress", "Status", "CompareBtn", "FolderBtn", "RefreshStatusBtn", "CancelBtn",
-                "Meta"]
-    assert [i for i in order if i in expected] == expected
-    assert parent["AnalyseBtn"] == parent["ThresholdSlider"], "Analyse and its threshold share a row"
-    assert parent["UpscaleCB"] == parent["UpscaleMode"] != parent["InterpCB"] == parent["InterpMode"]
-    assert H.text_of("ClipHeading") == "Clip"
-    assert H.text_of("ClipHeadingNote") == "From playhead"
-    assert (H.text_of("DrawingsHeading"), H.text_of("DrawingsHeadingNote")) == ("Drawings", "Optional")
-    assert H.text_of("RenderHeading") == "Render settings"
-    assert H.window.__attrs.Geometry[3] == 380
+    assert shown(H) == MAIN_VIEW
+    assert H.text_of("SourceLabel") == "shot.mov"
+    assert len(words(H)) <= 15, words(H)
+    geometry = H.window.__attrs.Geometry
+    assert (geometry[3], geometry[4]) == (380, 198)
+
+
+def test_settings_holds_the_rest_and_back_returns_without_starting_anything(lua, direct):
+    H = load(lua, ui_script(direct))
+    commands = H.command_count()
+    H.click("SettingsBtn")
+    assert shown(H) == SETTINGS_VIEW
+    assert "0.3.0" in H.text_of("SubTitle")
+    H.click("BackBtn")
+    assert shown(H) == MAIN_VIEW
+    assert H.command_count() == commands, "changing page ran something"
+
+
+def test_a_setting_changed_in_settings_applies_at_once(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.click("SettingsBtn")
+    H.set_slider("ThresholdSlider", 7)
+    H.set_combo("FormatCombo", 1)
+    H.chosen_dir = "D:/Renders/"
+    H.set_combo("FolderCombo", 1)
+    assert [conf_value(direct, k) for k in ("threshold", "format", "output_dir")] == [
+        "7", "mp4", "D:/Renders"]
+    H.click("BackBtn")
+    H.click("SmoothBtn")
+    cmd = H.last_command()
+    assert "--format mp4" in cmd and "--output-dir" in cmd and "--threshold" in cmd
+
+
+def test_an_analysis_started_in_settings_reports_there_and_after_back(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SettingsBtn")
+    H.click("AnalyseBtn")
+    assert {"ProgressBar", "Progress", "AnalysisLabel", "CancelBtn", "RefreshStatusBtn"} <= shown(H)
+    assert (H.text_of("CancelBtn"), H.text_of("AnalysisLabel")) == ("Stop", "Analysing...")
+    assert H.status() == "Analysing..." and "Status" not in shown(H), "said twice in Settings"
+    H.click("CancelBtn")
+    assert "Status" in shown(H) and H.status() == "Press Stop again to end the analysis."
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Animated on 2s.",
+                 marks="0,2", updated=time.time())
+    H.click("RefreshStatusBtn")
+    assert "CancelBtn" not in shown(H), "Stop stayed after the run ended"
+    H.click("BackBtn")
+    assert "Status" in shown(H) and H.status() == "Check the markers, then press Render."
+
+
+def test_a_render_shows_progress_and_stop_then_what_its_result_offers(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    assert not shown(H) & FEEDBACK
+    H.click("SmoothBtn")
+    write_status(direct, fraction=0.4, updated=time.time())
+    H.click("RefreshStatusBtn")
+    assert shown(H) & FEEDBACK == {"ProgressBar", "Progress", "Status", "RefreshStatusBtn",
+                                   "CancelBtn"}
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/out.mp4", updated=time.time())
+    H.click("RefreshStatusBtn")
+    assert shown(H) & FEEDBACK == {"ProgressBar", "Progress", "Status", "CompareBtn",
+                                   "FolderBtn", "Meta"}
+    assert "set the timeline to 3840x2160" in H.text_of("Meta")
+
+
+def test_a_failed_run_offers_only_its_log(lua, direct):
+    H = load(lua, ui_script(direct))
+    die(H, direct)
+    assert shown(H) & FEEDBACK == {"Status", "FolderBtn"}
+    assert H.text_of("FolderBtn") == "Open Log"
+
+
+def test_without_a_timer_refresh_progress_always_shows_and_reads_the_clip(lua, direct):
+    H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
+    H.no_timer = True
+    H.under_playhead = False
+    H.load(str(ui_script(direct)), "/media/shot.mov")
+    assert "RefreshStatusBtn" in shown(H)
+    H.under_playhead = True
+    H.click("RefreshStatusBtn")
+    assert H.text_of("SourceLabel") == "shot.mov"
+    assert {"RefreshStatusBtn", "Status"} <= shown(H)
+    assert H.status() == "No run in progress."
+
+
+def test_a_render_waiting_at_startup_offers_refresh_and_its_folder(lua, direct):
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Done.",
+                 import_path=str(direct / "shot_smooth.mp4"))
+    H = load(lua, ui_script(direct))
+    assert {"Status", "RefreshStatusBtn", "FolderBtn"} <= shown(H)
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert "RefreshStatusBtn" not in shown(H)
+
+
+def test_a_run_left_going_shows_its_stop_on_either_page_when_reopened(lua, direct):
+    import time
+    write_status(direct, fraction=0.4, updated=time.time())
+    H = load(lua, ui_script(direct))
+    assert {"Status", "CancelBtn", "RefreshStatusBtn"} <= shown(H)
+    H.click("SettingsBtn")
+    assert {"Status", "CancelBtn", "RefreshStatusBtn"} <= shown(H)
+    H.click("CancelBtn")
+    assert H.status().startswith("Press Stop again to end the run.")
+
+
+def test_no_clip_is_said_once_and_a_press_still_answers(lua, direct):
+    H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
+    H.under_playhead = False
+    H.load(str(ui_script(direct)), "/media/shot.mov")
+    assert "playhead" in H.text_of("SourceLabel") and "Status" not in shown(H)
+    H.click("SmoothBtn")
+    assert H.command_count() == 0
+    assert "Status" in shown(H) and "playhead" in H.status()
+
+
+def test_a_long_message_gets_room_and_the_window_grows_to_fit(lua, direct):
+    """Resolve does not grow a wrapped label to fit, so a finished render's
+    message was cut off top and bottom."""
+    H = load(lua, ui_script(direct))
+    finish_render(H, direct, message="Rendered 44 drawings into 1440 smooth frames. " * 3)
+    status = H.widgets["Status"]
+    assert status.WordWrap and status.Alignment.AlignTop
+    assert status.MinimumSize[2] >= -(-len(status.Text) // 56) * 15
+    assert H.size[2] >= 198 + status.MinimumSize[2]
+
+
+def test_the_progress_line_holds_two_lines_only_while_a_run_goes(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    assert H.widgets["Progress"].MinimumSize[2] == 30
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/out.mp4", updated=time.time())
+    H.click("RefreshStatusBtn")
+    assert "Progress" in shown(H) and H.widgets["Progress"].MinimumSize[2] == 16
+
+
+def test_progress_ticks_never_resize_the_window(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    H.fire("PollTimer", "Timeout")
+    before = len(H.resizes)
+    for step in range(1, 10):
+        write_status(direct, fraction=step / 10, stage="Interpolating and upscaling",
+                     updated=time.time())
+        H.fire("PollTimer", "Timeout")
+    assert len(H.resizes) == before
+
+
+def test_back_asks_for_the_smaller_page_once_more_on_the_next_tick(lua, direct):
+    """Qt keeps a window's size when its contents shrink, and may only lay it
+    out after the change, so it is asked once more, then left alone."""
+    H = load(lua, ui_script(direct))
+    H.click("SettingsBtn")
+    settings = H.size[2]
+    H.click("BackBtn")
+    main = H.size[2]
+    assert main < settings
+    asked = len(H.resizes)
+    H.fire("PollTimer", "Timeout")
+    assert len(H.resizes) == asked + 1 and H.size[2] == main
+    H.fire("PollTimer", "Timeout")
+    assert len(H.resizes) == asked + 1, "it resized on a tick with nothing new"
 
 
 AMBER = "#f2a93b"
@@ -377,10 +531,10 @@ def test_amber_fills_only_render(lua, direct):
 
 
 SWITCH_WORDS = {
-    ("UpscaleCB", True): "On: 2x via DirectML or Super Scale",
-    ("UpscaleCB", False): "Off: original resolution",
-    ("InterpCB", True): "On: 3x longer, in-betweens drawn",
-    ("InterpCB", False): "Off: original timing",
+    ("UpscaleCB", True): "On \u00b7 2x",
+    ("UpscaleCB", False): "Off \u00b7 original size",
+    ("InterpCB", True): "On \u00b7 3x longer",
+    ("InterpCB", False): "Off \u00b7 same length",
 }
 SWITCHES = [(True, True), (True, False), (False, True), (False, False)]
 
@@ -397,8 +551,8 @@ def assert_render_matches(H, upscale, interp):
 
 @pytest.mark.parametrize("upscale,interp", SWITCHES)
 def test_each_switch_says_in_words_what_it_does_to_the_render(lua, direct, upscale, interp):
-    """Only an amber border said a switch was on. The line under each one now
-    says On or Off and what that does, matching the flags Render sends."""
+    """Only an amber border said a switch was on. The line under each one
+    says On or Off, and for Interpolate the length, matching what Render sends."""
     H = load(lua, ui_script(direct))
     # Through the panel's own handlers, away and back, so each change is shown.
     for switch, on in (("UpscaleCB", upscale), ("InterpCB", interp)):
@@ -420,13 +574,17 @@ def test_a_restored_setting_shows_its_words_from_the_start(lua, direct, upscale,
     assert_render_matches(H, upscale, interp)
 
 
-def test_the_upscale_words_do_not_promise_a_2x_file(lua, direct):
-    """Real-ESRGAN draws a 2x file only on a GPU. Without one the file keeps
-    its own size and Super Scale is set on the imported clip, as the stage's
-    own help for the flag says."""
+@pytest.mark.parametrize("separator", ["\\\\", "/"])
+def test_the_upscale_words_assume_no_gpu_runtime_on_either_system(lua, direct, separator):
+    """DirectML is Windows only, and on a Mac Super Scale does the upscale, so
+    the words name the factor. The tip, and the stage's help, say how."""
     from Stages.resolve_smooth import build_parser
+    lua.execute(f'package.config = "{separator}" .. package.config:sub(2)')
     H = load(lua, ui_script(direct))
-    assert "DirectML" in H.text_of("UpscaleMode") and "Super Scale" in H.text_of("UpscaleMode")
+    assert H.text_of("UpscaleMode") == SWITCH_WORDS["UpscaleCB", True]
+    assert not {"DirectML", "GPU"} & set(words(H))
+    tip = H.widgets["UpscaleCB"].ToolTip
+    assert "On Mac" in tip and "Super Scale" in tip
     flag = next(a.help for a in build_parser()._actions if "--network-upscale" in a.option_strings)
     assert "Without a GPU" in flag and "Super Scale" in flag
 
@@ -497,17 +655,6 @@ def test_text_on_the_panel_reads_at_4_5_to_1_or_better(lua, direct):
         assert contrast(rule["color"], back) >= 4.5, f"{wid}: {rule['color']} on {back}"
         checked += 1
     assert checked >= 20
-
-
-def test_long_messages_have_room_to_wrap(lua, direct):
-    """A finished render's message, with the import's notes after it, runs to
-    five lines at 380 wide, and the box held three. The switches' words get
-    two lines, for a larger font."""
-    H = load(lua, ui_script(direct))
-    status = H.widgets["Status"]
-    assert status.WordWrap and status.MinimumSize[2] >= 72 and status.Alignment.AlignTop
-    for mode in ("UpscaleMode", "InterpMode"):
-        assert H.widgets[mode].WordWrap and H.widgets[mode].MinimumSize[2] >= 28
 
 
 # --------------------------------------------------------------------------
@@ -1037,7 +1184,7 @@ def test_a_finished_render_message_fits_the_status_box(lua, direct):
     H = load(lua, ui_script(direct))
     finish_render(H, direct, message="Rendered 25 drawings into 337 smooth frames.")
     status = H.widgets["Status"]
-    assert status.MinimumSize[2] >= 3 * 15, "the box is shorter than three lines of 11 px text"
+    assert status.MinimumSize[2] >= -(-len(status.Text) // 56) * 15, "the box is shorter than its lines"
     assert status.ToolTip == status.Text, "a longer message has no other way to be read"
 
 
@@ -1945,7 +2092,7 @@ def test_smooth_keeps_the_last_clip_when_the_playhead_is_in_a_gap(lua, direct):
     H.under_playhead = False
     H.click("SmoothBtn")
     assert "/media/first.mov" in H.last_command()
-    assert H.text_of("ClipHeadingNote") == "Last usable clip"
+    assert H.text_of("SourceLabel") == "first.mov\nLast usable clip"
 
 
 # --------------------------------------------------------------------------
@@ -2254,7 +2401,7 @@ def test_a_trimmed_clip_sends_only_its_range(lua, direct):
     H.load(str(ui_script(direct)), "/media/shot.mov")
     H.click("AnalyseBtn")
     assert "--start-time 24.500000 --end-time 26.500000" in H.last_command()
-    assert "2.00 s long" in H.widgets["SourceLabel"].Text
+    assert H.text_of("SourceLabel") == "shot.mov\nTrimmed: 24.50 to 26.50 s"
 
 
 def test_smooth_sends_the_range_too(lua, direct):
@@ -2269,7 +2416,27 @@ def test_a_build_without_trim_info_uses_the_whole_file(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("AnalyseBtn")
     assert "--start-time" not in H.last_command()
-    assert "Whole file" in H.widgets["SourceLabel"].Text
+    assert H.text_of("SourceLabel") == "shot.mov"
+
+
+def test_a_clip_from_the_files_first_frame_is_not_called_trimmed(lua, direct):
+    """Every clip has a range, and the old line read "2.00 s long, from
+    0.00 s of the file" for one that uses all of it."""
+    H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
+    H.source_range = lua.table(0.0, 2.0)
+    H.load(str(ui_script(direct)), "/media/shot.mov")
+    assert H.text_of("SourceLabel") == "shot.mov"
+
+
+def test_a_clip_that_ends_before_its_file_does_is_trimmed(lua, direct):
+    H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
+    H.source_range = lua.table(0.0, 2.0)
+    H.clip_frames = "240"
+    H.load(str(ui_script(direct)), "/media/shot.mov")
+    assert H.text_of("SourceLabel") == "shot.mov\nTrimmed: 0.00 to 2.00 s"
+    H.clip_frames = "48"
+    H.load(str(ui_script(direct)), "/media/shot.mov")
+    assert H.text_of("SourceLabel") == "shot.mov"
 
 
 def test_trim_frames_are_converted_at_the_media_rate(lua, direct):
@@ -3414,10 +3581,10 @@ def test_the_clip_card_keeps_the_last_clip_in_a_gap(lua, direct):
     assert "shot.mov" in H.widgets["SourceLabel"].Text
     assert H.widgets["SourceLabel"].ToolTip.endswith("\n\n/media/shot.mov")
     assert H.status() == "Ready.", "a gap reported itself in the status"
-    assert H.text_of("ClipHeadingNote") == "Last usable clip"
+    assert H.text_of("SourceLabel") == "shot.mov\nLast usable clip"
     H.under_playhead = True
     follow(H)
-    assert H.text_of("ClipHeadingNote") == "From playhead"
+    assert H.text_of("SourceLabel") == "shot.mov", "the clip under the playhead was called kept"
 
 
 def test_with_no_clip_the_card_has_no_path(lua, direct):
@@ -3426,7 +3593,7 @@ def test_with_no_clip_the_card_has_no_path(lua, direct):
     H.load(str(ui_script(direct)), "/media/shot.mov")
     assert "shot.mov" not in H.widgets["SourceLabel"].ToolTip
     assert "playhead" in H.widgets["SourceLabel"].ToolTip
-    assert H.text_of("ClipHeadingNote") == ""
+    assert "Last usable clip" not in H.text_of("SourceLabel")
 
 
 def test_a_clip_kept_from_before_keeps_its_tip(lua, direct):
@@ -3436,7 +3603,7 @@ def test_a_clip_kept_from_before_keeps_its_tip(lua, direct):
     H.click("AnalyseBtn")
     assert "shot.mov" in H.widgets["SourceLabel"].Text
     assert H.widgets["SourceLabel"].ToolTip.endswith("/media/shot.mov")
-    assert H.text_of("ClipHeadingNote") == "Last usable clip"
+    assert H.text_of("SourceLabel").endswith("\nLast usable clip")
 
 
 def test_analysing_again_replaces_only_its_own_markers(lua, direct):
@@ -3575,17 +3742,19 @@ def test_a_long_clip_name_leaves_room_for_its_range(lua, direct):
     """Scene pack names run long, and wrapped they hid the range line."""
     name = ("『葬送のフリーレン』第2期ノンクレジットオープニング映像／OPテーマ：「lulu.」"
             "Mrs. GREEN APPLE／フリーレンOP - TOHO animation チャンネル (1080p, h264).mp4")
-    H = load(lua, ui_script(direct), clip="/media/" + name)
+    H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
+    H.source_range = lua.table(1.0, 3.0)
+    H.load(str(ui_script(direct)), "/media/" + name)
     first, second = H.text_of("SourceLabel").split("\n")
     assert first.startswith("『葬送のフリーレン』") and first.endswith("(1080p, h264).mp4")
     assert "..." in first and len(first) < len(name)
     assert "\ufffd" not in first
-    assert second.startswith("Whole file") or "of the file" in second
+    assert second == "Trimmed: 1.00 to 3.00 s"
 
 
 def test_a_short_clip_name_is_left_whole(lua, direct):
     H = load(lua, ui_script(direct), clip="/media/Gojo s laughter.mp4")
-    assert H.text_of("SourceLabel").startswith("Gojo s laughter.mp4\n")
+    assert H.text_of("SourceLabel") == "Gojo s laughter.mp4"
 
 
 def test_analyse_markers_never_read_back_as_the_drawing_before(lua, direct):
