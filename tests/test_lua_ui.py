@@ -357,7 +357,7 @@ def test_the_panel_reads_as_clip_drawings_settings_then_render(lua, direct):
     assert parent["AnalyseBtn"] == parent["ThresholdSlider"], "Analyse and its threshold share a row"
     assert parent["UpscaleCB"] == parent["UpscaleMode"] != parent["InterpCB"] == parent["InterpMode"]
     assert H.text_of("ClipHeading") == "Clip"
-    assert H.text_of("ClipHeadingNote") == "At the playhead"
+    assert H.text_of("ClipHeadingNote") == "From playhead"
     assert (H.text_of("DrawingsHeading"), H.text_of("DrawingsHeadingNote")) == ("Drawings", "Optional")
     assert H.text_of("RenderHeading") == "Render settings"
     assert H.window.__attrs.Geometry[3] == 380
@@ -377,7 +377,7 @@ def test_amber_fills_only_render(lua, direct):
 
 
 SWITCH_WORDS = {
-    ("UpscaleCB", True): "On: 2x on a GPU, else Super Scale",
+    ("UpscaleCB", True): "On: 2x via DirectML or Super Scale",
     ("UpscaleCB", False): "Off: original resolution",
     ("InterpCB", True): "On: 3x longer, in-betweens drawn",
     ("InterpCB", False): "Off: original timing",
@@ -426,7 +426,7 @@ def test_the_upscale_words_do_not_promise_a_2x_file(lua, direct):
     own help for the flag says."""
     from Stages.resolve_smooth import build_parser
     H = load(lua, ui_script(direct))
-    assert "GPU" in H.text_of("UpscaleMode") and "Super Scale" in H.text_of("UpscaleMode")
+    assert "DirectML" in H.text_of("UpscaleMode") and "Super Scale" in H.text_of("UpscaleMode")
     flag = next(a.help for a in build_parser()._actions if "--network-upscale" in a.option_strings)
     assert "Without a GPU" in flag and "Super Scale" in flag
 
@@ -1937,6 +1937,7 @@ def test_smooth_keeps_the_last_clip_when_the_playhead_is_in_a_gap(lua, direct):
     H.under_playhead = False
     H.click("SmoothBtn")
     assert "/media/first.mov" in H.last_command()
+    assert H.text_of("ClipHeadingNote") == "Last usable clip"
 
 
 # --------------------------------------------------------------------------
@@ -3405,6 +3406,10 @@ def test_the_clip_card_keeps_the_last_clip_in_a_gap(lua, direct):
     assert "shot.mov" in H.widgets["SourceLabel"].Text
     assert H.widgets["SourceLabel"].ToolTip.endswith("\n\n/media/shot.mov")
     assert H.status() == "Ready.", "a gap reported itself in the status"
+    assert H.text_of("ClipHeadingNote") == "Last usable clip"
+    H.under_playhead = True
+    follow(H)
+    assert H.text_of("ClipHeadingNote") == "From playhead"
 
 
 def test_with_no_clip_the_card_has_no_path(lua, direct):
@@ -3413,6 +3418,7 @@ def test_with_no_clip_the_card_has_no_path(lua, direct):
     H.load(str(ui_script(direct)), "/media/shot.mov")
     assert "shot.mov" not in H.widgets["SourceLabel"].ToolTip
     assert "playhead" in H.widgets["SourceLabel"].ToolTip
+    assert H.text_of("ClipHeadingNote") == ""
 
 
 def test_a_clip_kept_from_before_keeps_its_tip(lua, direct):
@@ -3422,6 +3428,7 @@ def test_a_clip_kept_from_before_keeps_its_tip(lua, direct):
     H.click("AnalyseBtn")
     assert "shot.mov" in H.widgets["SourceLabel"].Text
     assert H.widgets["SourceLabel"].ToolTip.endswith("/media/shot.mov")
+    assert H.text_of("ClipHeadingNote") == "Last usable clip"
 
 
 def test_analysing_again_replaces_only_its_own_markers(lua, direct):

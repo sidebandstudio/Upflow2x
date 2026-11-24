@@ -1007,7 +1007,7 @@ local TIPS = {
     detection = "Analyse finds the real drawings and puts a marker on each one. Delete a marker to leave its frame out, or add one with M. Render uses the marked frames, and finds the drawings itself on a clip with none.",
     threshold = "How big a change Analyse counts as a new drawing. Lower catches small moves, like only a mouth. Higher counts only big ones.",
     render = "Render draws on your GPU and puts the result on the track above the clip. Resolve stays usable while it runs.",
-    upscale = "Draw every frame at 2x with Real-ESRGAN's anime model, on the GPU on Windows. Without a GPU, Resolve's Super Scale does it.\nIt shows on a timeline bigger than the clip.",
+    upscale = "On Windows, Real-ESRGAN can draw a 2x file using DirectML. On Mac, or if the model cannot run, Resolve uses Super Scale on import.\nIt shows on a timeline bigger than the clip.",
     interp = "Draw the missing in-betweens with the RIFE network, on the GPU on Windows. Its first use downloads about 50 MB.\nThe render plays at a third of the clip's speed, ready to time remap.\nOff keeps every drawing on its frame and the clip's length, and draws nothing, to upscale only.",
     format = "Image sequence is lossless and imports most reliably. MP4 is one small file but lossy, and MKV is one lossless file. All are 8-bit RGB.",
     -- The same list as Installer/install_upflow2x.py's REQUIREMENTS.
@@ -1078,7 +1078,7 @@ local win = disp:AddWindow({
     },
 
     ui:VGroup{ Weight = 0, Spacing = 6,
-        heading("ClipHeading", "Clip", "At the playhead"),
+        heading("ClipHeading", "Clip"),
         ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = CARD,
                   WordWrap = true, MinimumSize = { 0, 46 }, ToolTip = TIPS.clip, Weight = 0 },
     },
@@ -1181,7 +1181,7 @@ fill_folders()
 -- in-betweens into a render three times as long, and off keeps the timing.
 local function show_modes()
     items.UpscaleMode.Text = items.UpscaleCB.Checked
-        and "On: 2x on a GPU, else Super Scale" or "Off: original resolution"
+        and "On: 2x via DirectML or Super Scale" or "Off: original resolution"
     items.InterpMode.Text = items.InterpCB.Checked
         and "On: 3x longer, in-betweens drawn" or "Off: original timing"
 end
@@ -1300,6 +1300,8 @@ end
 -- With keep, a playhead in a gap leaves the last clip, and the card, as they are.
 local function refresh_source(keep)
     local path, err, range, place, item = selected_clip_path()
+    local origin = path and "From playhead" or (keep and SOURCE_PATH and "Last usable clip" or "")
+    if items.ClipHeadingNote.Text ~= origin then items.ClipHeadingNote.Text = origin end
     if not path then
         if keep and SOURCE_PATH then return false end
         SOURCE_PATH = nil
