@@ -2764,6 +2764,164 @@ def test_a_start_keeps_a_render_that_finished_while_the_panel_was_closed(lua, di
     assert H.command_count() == 1
 
 
+# --------------------------------------------------------------------------
+# a run that cannot start leaves the run before it in place
+# --------------------------------------------------------------------------
+
+def break_writes(lua, pattern):
+    """Files whose path matches the Lua `pattern` open to write, which empties
+    them, then fail as they close, as on a full disk. Until mend_writes."""
+    lua.execute(f"""
+        REAL_OPEN = REAL_OPEN or io.open
+        local real_open = REAL_OPEN
+        io.open = function(path, mode)
+            local f = real_open(path, mode)
+            if not (f and tostring(path):find("{pattern}") and (mode or "r"):find("w")) then
+                return f
+            end
+            return {{ write = function(self) return self end,
+                     close = function() f:close() return nil, "No space left on device" end }}
+        end
+    """)
+
+
+def mend_writes(lua):
+    lua.execute("if REAL_OPEN then io.open = REAL_OPEN; REAL_OPEN = nil end")
+
+
+def back_to_the_first_clip(lua, H, span):
+    """The playhead goes back to the clip it was on before next_clip, which
+    sits at `span`."""
+    lua.execute("local H, span = ...; H.clip_file, H.item_id, H.src_span = nil, nil, span",
+                H, span)
+
+
+def retry_renders_the_next_clip(H, root, a, imported):
+    """With A's render in, Render of the next clip starts and goes in at that
+    clip's place."""
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    launches, placed = H.command_count(), len(H.placements)
+    H.click("SmoothBtn")
+    assert H.command_count() == launches + 1, "the retry did not start"
+    b = run_tag(root)
+    assert b not in ("", a)
+    ends(root, b, "shot_b")
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == imported + 1
+    assert H.imported_at(imported + 1) == "/renders/shot_b_smooth.mp4"
+    assert len(H.placements) == placed + 1 and H.placements[placed + 1].recordFrame == 90000
+
+
+@pytest.mark.parametrize("start", ["SmoothBtn", "AnalyseBtn"])
+@pytest.mark.parametrize("a_ends", ["during the launch", "after it"])
+def test_a_launch_that_fails_leaves_the_run_given_up_on_in_place(lua, direct, start, a_ends):
+    """B's launch failed after the pointer named B, so when A finished after
+    all, Refresh Progress said no run."""
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    first = H.src_span
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    H.exit_code = 1
+    if a_ends == "during the launch":
+        H.on_execute = lambda cmd: ends(direct, a, "shot")
+    launches = H.command_count()
+    H.click(start)
+    H.on_execute = None
+    H.exit_code = 0
+    assert H.command_count() == launches + 1, "B was not tried"
+    assert "Could not start the run" in H.status()
+    assert H.enabled("SmoothBtn") and H.enabled("AnalyseBtn")
+    assert run_tag(direct) == a, "the pointer names a run that never started"
+    assert all(p.name.startswith(f".upflow2x_run-{a}.")
+               for p in direct.glob(".upflow2x_run-*")), "B left files behind"
+    if a_ends == "after it":
+        ends(direct, a, "shot")
+    back_to_the_first_clip(lua, H, first)
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert H.imported_at(1) == "/renders/shot_smooth.mp4"
+    assert len(H.placements) == 1 and H.placements[1].recordFrame == 86400, \
+        "A did not go in above its own clip"
+    retry_renders_the_next_clip(H, direct, a, 1)
+
+
+@pytest.mark.parametrize("start", ["SmoothBtn", "AnalyseBtn"])
+def test_a_panel_opened_after_a_failed_launch_finds_the_run_before(lua, direct, start):
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    H.exit_code = 1
+    H.click(start)
+    H.exit_code = 0
+    ends(direct, a, "shot")
+    H = load(lua, ui_script(direct))
+    assert run_tag(direct) == a
+    assert "finished while the panel was closed" in H.status()
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert H.imported_at(1) == "/renders/shot_smooth.mp4"
+    retry_renders_the_next_clip(H, direct, a, 1)
+
+
+def test_marked_frames_that_cannot_be_written_leave_the_run_given_up_on_in_place(lua, direct):
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    first = H.src_span
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    for frame in (0, 6):
+        H.add_marker(frame)
+    break_writes(lua, "%.marks$")
+    launches = H.command_count()
+    H.click("SmoothBtn")
+    mend_writes(lua)
+    assert H.command_count() == launches
+    assert "Could not write the marked frames" in H.status()
+    assert run_tag(direct) == a
+    assert not list(direct.glob(".upflow2x_run-*.marks")), "B's half-written marks stayed"
+    ends(direct, a, "shot")
+    back_to_the_first_clip(lua, H, first)
+    H.click("RefreshStatusBtn")
+    assert H.imported_at(1) == "/renders/shot_smooth.mp4"
+    assert len(H.placements) == 1 and H.placements[1].recordFrame == 86400
+    retry_renders_the_next_clip(H, direct, a, 1)
+
+
+def test_a_pointer_that_cannot_be_written_still_names_the_run_before(lua, direct):
+    """Opening the pointer to write empties it, so a write that failed after
+    that left it naming no run, and the next panel could not find A."""
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    break_writes(lua, "%.upflow2x_run[^%-/\\\\]*$")
+    launches = H.command_count()
+    H.click("SmoothBtn")
+    mend_writes(lua)
+    assert H.command_count() == launches, "B started with no pointer to find it by"
+    assert "Could not start the run" in H.status()
+    assert run_tag(direct) == a
+    ends(direct, a, "shot")
+    H = load(lua, ui_script(direct))
+    assert "finished while the panel was closed" in H.status()
+    H.click("RefreshStatusBtn")
+    assert H.imported_at(1) == "/renders/shot_smooth.mp4"
+
+
+def test_a_failed_first_launch_after_0_5_1_still_finds_the_0_5_1_run(lua, direct):
+    import time
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    H = load(lua, ui_script(direct))
+    H.click("CancelBtn")
+    assert H.status() == GAVE_UP
+    H.exit_code = 1
+    H.click("SmoothBtn")
+    H.exit_code = 0
+    assert run_tag(direct) == ""
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/renders/old_smooth.mp4", updated=time.time())
+    H.click("RefreshStatusBtn")
+    assert H.imported_at(1) == "/renders/old_smooth.mp4"
+
+
 def test_reset_of_a_dead_run_needs_one_press(lua, direct):
     """Nothing is lost clearing a run that already ended, so it does not ask."""
     H = load(lua, ui_script(direct))

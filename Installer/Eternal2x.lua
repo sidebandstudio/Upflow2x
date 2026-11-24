@@ -252,13 +252,13 @@ end
 -- Names the run the panel owns, the only one it follows, stops or imports.
 -- Written before that run starts, so a panel opened later finds it too.
 local RUN_POINTER = join_path(RUN_DIR, ".upflow2x_run")
-local RUN_TAG, STATUS_PATH, STOP_PATH, EXIT_PATH, MARKS_PATH, RUN_SCRIPT, LOG_PATH
+local RUN_TAG, STATUS_PATH, STOP_PATH, EXIT_PATH, RUN_SCRIPT, LOG_PATH
 
 local function use_run(tag)
     local files = run_files(tag)
     RUN_TAG = tag
     STATUS_PATH, STOP_PATH, EXIT_PATH = files.status, files.stop, files.exit
-    MARKS_PATH, RUN_SCRIPT, LOG_PATH = files.marks, files.script, files.log
+    RUN_SCRIPT, LOG_PATH = files.script, files.log
 end
 use_run((read_file(RUN_POINTER) or ""):match("^%s*([%w%-]*)"))
 
@@ -1879,21 +1879,6 @@ end
 local CANNOT_START = "Could not start the run. Check that Upflow2x's folder can be written to, "
     .. "then try again."
 
--- A run that never started has nothing to poll, so the panel says so now.
-local function start_run(args)
-    LAUNCHED_AT = os.time()
-    if run_background("Stages.resolve_smooth", args) then
-        start_polling()
-        return
-    end
-    local msg = CANNOT_START
-    set_busy(false)
-    set_progress(0, nil)
-    if ANALYSING then items.AnalysisLabel.Text = msg end
-    ANALYSING = false
-    set_status(msg)
-end
-
 local WAITING = "A render finished while the panel was closed. "
     .. "Press Refresh Progress to add it to the timeline."
 local PENDING = "A finished render has not been added yet. "
@@ -1962,27 +1947,66 @@ end
 
 local RUNS_STARTED = 0
 
--- Gives the new run files of its own and names it in the pointer, which
--- makes it the run the panel owns. The last run's files go when `ended`, the
--- look before it, showed that run had ended. One that may still be going
--- keeps them, and they are the only files it can write to. False when the
--- pointer could not be written, as a panel opened later could not find it.
-local function begin_run(ended)
-    if ended then
-        for _, path in pairs(run_files(RUN_TAG)) do os.remove(path) end
+-- Names the run tagged `tag` in the pointer. Opening a file to write empties
+-- it, so the tag is written beside the pointer and moved into place: a write
+-- that fails partway leaves the pointer naming the run it named.
+local function point_to(tag)
+    local new = RUN_POINTER .. ".new"
+    local f = io.open(new, "w")
+    local wrote = f and f:write(tag)
+    local closed = f and f:close()
+    -- Windows moves a file only onto a name not in use.
+    if wrote and closed and (os.rename(new, RUN_POINTER)
+            or (os.remove(RUN_POINTER) and os.rename(new, RUN_POINTER))) then
+        return true
     end
+    os.remove(new)
+    return false
+end
+
+-- Starts a run with files of its own, `marks` among them, and names it in the
+-- pointer first, so a panel opened later finds it too. That makes it the run
+-- the panel owns. Until it is on its way, nothing of the last run changes: if
+-- it cannot start, the pointer names the last run again, and a run Reset gave
+-- up on that finishes after all is still found. Once it starts, the last
+-- run's files go when `ended`, the look before it, showed that run had
+-- ended. One that may still be going keeps them, and they are the only files
+-- it can write to. Returns whether the run started, and if not, why.
+local function launch(ended, extra, marks)
+    local last = RUN_TAG
     local tag
     repeat
         RUNS_STARTED = RUNS_STARTED + 1
         tag = string.format("%d-%d-%s", os.time(), RUNS_STARTED,
                             ((tostring({}):gsub("%W", "")):sub(-6)))
     until not (exists(run_files(tag).status) or exists(run_files(tag).exit))
-    local f = io.open(RUN_POINTER, "w")
-    local wrote = f and f:write(tag)
-    local closed = f and f:close()
-    if not (wrote and closed) then return false end
-    use_run(tag)
-    return true
+    local files = run_files(tag)
+    if marks and #marks > 0 then
+        -- A write can look fine and still fail as the file closes.
+        local f = io.open(files.marks, "w")
+        local wrote = f and f:write(table.concat(marks, ","))
+        local closed = f and f:close()
+        if not (wrote and closed) then
+            os.remove(files.marks)
+            return false, "Could not write the marked frames to " .. files.marks .. "."
+        end
+        extra = extra .. " --marks-file " .. shell_quote(files.marks)
+    end
+    if point_to(tag) then
+        use_run(tag)
+        if run_background("Stages.resolve_smooth", current_args(extra)) then
+            if ended then
+                for _, path in pairs(run_files(last)) do os.remove(path) end
+            end
+            LAUNCHED_AT = os.time()
+            start_polling()
+            return true
+        end
+        use_run(last)
+        point_to(last)
+    end
+    for _, path in pairs(files) do os.remove(path) end
+    return false, CANNOT_START
 end
 
 -- ---------------------------------------------------------------------------
@@ -2017,8 +2041,10 @@ function win.On.AnalyseBtn.Clicked(ev)
     if not pick_source() then return end
     -- Backgrounded like the render: analysis is quick on a short clip but can
     -- take tens of seconds on a long one, and Resolve must not freeze for it.
-    if not begin_run(ended) then
-        set_status(CANNOT_START)
+    local started, why = launch(ended, " --analyse")
+    if not started then
+        items.AnalysisLabel.Text = why
+        set_status(why)
         return
     end
     offer_log(false)
@@ -2032,7 +2058,6 @@ function win.On.AnalyseBtn.Clicked(ev)
     set_status("Analysing...")
     items.AnalysisLabel.Text = "Analysing..."
     items.AnalysisLabel.ToolTip = ""
-    start_run(current_args(" --analyse"))
 end
 
 function win.On.SmoothBtn.Clicked(ev)
@@ -2054,20 +2079,10 @@ function win.On.SmoothBtn.Clicked(ev)
         set_status("Could not read the markers on the clip from Resolve, so nothing was rendered.")
         return
     end
-    -- The marked frames go in the new run's own file, so it comes first.
-    if not begin_run(ended) then
-        set_status(CANNOT_START)
+    local started, why = launch(ended, "", marks)
+    if not started then
+        set_status(why)
         return
-    end
-    if #marks > 0 then
-        -- A write can look fine and still fail as the file closes.
-        local f = io.open(MARKS_PATH, "w")
-        local wrote = f and f:write(table.concat(marks, ","))
-        local closed = f and f:close()
-        if not (wrote and closed) then
-            set_status("Could not write the marked frames to " .. MARKS_PATH .. ".")
-            return
-        end
     end
     offer_log(false)
     IMPORTED = false
@@ -2081,10 +2096,8 @@ function win.On.SmoothBtn.Clicked(ev)
     set_progress(0.01, "Starting")
     if #marks > 0 then
         set_status("Rendering the " .. #marks .. " marked frames.")
-        start_run(current_args(" --marks-file " .. shell_quote(MARKS_PATH)))
     else
         set_status("Rendering. No markers, so Upflow2x finds the drawings.")
-        start_run(current_args(""))
     end
 end
 
