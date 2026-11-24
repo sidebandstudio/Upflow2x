@@ -39,6 +39,8 @@ def setup(tmp_path, monkeypatch):
     app._log = lambda *args: None
     app._set_progress = lambda *args: None
     app.install_done = False
+    app._quit, app._child_lock, app._child, app._worker = (
+        threading.Event(), threading.Lock(), None, None)
 
     def download_python():
         path = gui._embedded_python_exe(destination)
@@ -168,7 +170,8 @@ def window(**attrs):
     app.install_btn = mock.MagicMock()
     app.source_root = Path("/no/plugin")
     app.installing = app.install_done = False
-    app._pip = None
+    app._quit, app._child_lock, app._child, app._worker = (
+        threading.Event(), threading.Lock(), None, None)
     app.logged = []
     app._log = lambda msg, tag=None: app.logged.append((msg, tag))
     for key, value in attrs.items():
@@ -193,16 +196,25 @@ def test_the_label_follows_pip_from_package_to_package(line, step):
 
 
 class FakePip:
-    """pip as Popen sees it: its lines, then its exit code."""
+    """pip as Popen sees it: its lines, then its exit code. With hang it runs
+    until killed, with times_out a wait given a timeout runs out, and with a
+    gate Popen does not return until the gate opens."""
 
-    def __init__(self, lines, code=0, hang=False):
+    def __init__(self, lines=(), code=0, hang=False, times_out=False, gate=None):
         self.lines, self.code, self.hang = lines, code, hang
+        self.times_out, self.gate = times_out, gate
         self.returncode = None
         self.killed = threading.Event()
+        self.starting = threading.Event()
         self.args = self.kwargs = None
+        self.calls = 0
 
     def __call__(self, args, **kwargs):
+        self.calls += 1
         self.args, self.kwargs = args, kwargs
+        self.starting.set()
+        if self.gate is not None:
+            assert self.gate.wait(5), "Popen was never let return"
         self.stdout = self._read()
         return self
 
@@ -211,6 +223,14 @@ class FakePip:
         if self.hang:
             assert self.killed.wait(5), "setup never gave up on pip"
 
+    def communicate(self, timeout=None):
+        if self.times_out and timeout is not None and not self.killed.is_set():
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        if self.hang:
+            assert self.killed.wait(5), "setup never gave up on pip"
+        self.returncode = self.code
+        return "".join(line + "\n" for line in self.lines), ""
+
     def kill(self):
         self.killed.set()
         self.code = -9
@@ -218,6 +238,22 @@ class FakePip:
     def wait(self):
         self.returncode = self.code
         return self.code
+
+
+def in_thread(call, *args):
+    """Run call in a thread of its own, as setup's install thread runs, and
+    keep what it returned or raised."""
+    outcome = []
+
+    def run():
+        try:
+            outcome.append(call(*args))
+        except BaseException as exc:  # noqa: B036 - a quit unwinds as BaseException
+            outcome.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, outcome
 
 
 PIP_OUTPUT = [
@@ -381,8 +417,7 @@ def test_quitting_during_pip_ends_pip_and_leaves_nothing_running(monkeypatch):
     monkeypatch.setattr(gui.threading, "Timer", spy)
     app = window(installing=True)
     app._pulse = lambda label: None
-    worker = threading.Thread(target=app._install_packages, args=("python",), daemon=True)
-    worker.start()
+    worker, outcome = in_thread(app._install_packages, "python")
     try:
         deadline = time.monotonic() + 5
         while not timers and time.monotonic() < deadline:
@@ -394,5 +429,125 @@ def test_quitting_during_pip_ends_pip_and_leaves_nothing_running(monkeypatch):
         pip.kill()
         worker.join(5)
     assert not worker.is_alive()
+    assert isinstance(outcome[0], gui._Quit), "the install thread went on after the quit"
+    assert not any(tag == "err" for _, tag in app.logged), "it reported to a closed window"
     assert timers[0].daemon, "the timer would keep setup's process alive"
     assert not timers[0].is_alive()
+
+
+def test_quit_before_pip_starts_starts_nothing(monkeypatch):
+    monkeypatch.setattr(gui.subprocess, "Popen",
+                        lambda *args, **kwargs: pytest.fail("pip started after the quit"))
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app = window(installing=True)
+    app._pulse = lambda label: None
+    app._close()
+    with pytest.raises(gui._Quit):
+        app._install_packages("python")
+
+
+def test_quit_while_pip_is_starting_ends_it_once_started(monkeypatch):
+    """The window closed while Popen had not yet returned, so there was no
+    handle to end, and pip ran on with no window. Quit must not wait for
+    Popen either, or the window would freeze."""
+    import time
+    gate = threading.Event()
+    pip = FakePip(["Collecting numpy"], hang=True, gate=gate)
+    monkeypatch.setattr(gui.subprocess, "Popen", pip)
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app = window(installing=True)
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, "python")
+    try:
+        assert pip.starting.wait(5)
+        began = time.monotonic()
+        app._close()
+        assert time.monotonic() - began < 1, "quit waited for Popen"
+        app.root.destroy.assert_called_once()
+        gate.set()
+        assert pip.killed.wait(2), "pip kept running after setup quit"
+    finally:
+        gate.set()
+        pip.kill()
+        worker.join(5)
+    assert isinstance(outcome[0], gui._Quit)
+
+
+def test_quit_during_the_pip_bootstrap_ends_it_and_starts_nothing_more(setup, tmp_path,
+                                                                       monkeypatch):
+    """get-pip ran through subprocess.run, which Quit could not reach, and the
+    install thread went on to the packages and the launcher."""
+    import io
+    import zipfile
+    app, scripts = setup
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("python.exe", b"")
+        zf.writestr("python311._pth", "python311.zip\n.\n#import site\n")
+    monkeypatch.setattr(gui, "_download_with_progress", lambda url, callback=None:
+                        archive.getvalue() if url == gui.PYTHON_WIN_EMBED_URL else b"# get-pip")
+    get_pip = FakePip(hang=True)
+    monkeypatch.setattr(gui.subprocess, "Popen", get_pip)
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app._setup_embedded_python = app._setup_embedded_python_windows
+    del app._install_packages
+    app._pulse = lambda label: None
+    app.root.destroy = mock.Mock()
+    app._on_finish = mock.Mock()
+    app.installing = True
+    worker, outcome = in_thread(app._run_install)
+    try:
+        assert get_pip.starting.wait(5)
+        assert get_pip.args[1].endswith("get-pip.py")
+        app._close()
+        assert get_pip.killed.wait(2), "get-pip kept running after setup quit"
+    finally:
+        get_pip.kill()
+        worker.join(5)
+    assert outcome == [None], outcome
+    assert get_pip.calls == 1, "pip install started after the quit"
+    app._on_finish.assert_not_called()
+    assert not (scripts / "Upflow2x.lua").exists()
+
+
+def test_a_bootstrap_that_runs_too_long_is_ended(tmp_path, monkeypatch):
+    """The 120 second limit subprocess.run gave get-pip still holds."""
+    import io
+    import zipfile
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("python.exe", b"")
+    monkeypatch.setattr(gui, "_download_with_progress", lambda url, callback=None:
+                        archive.getvalue() if url == gui.PYTHON_WIN_EMBED_URL else b"# get-pip")
+    get_pip = FakePip(times_out=True)
+    monkeypatch.setattr(gui.subprocess, "Popen", get_pip)
+    app = window(repo_root=tmp_path)
+    app._pulse = lambda label: None
+    assert app._setup_embedded_python_windows() is None
+    assert get_pip.killed.is_set()
+    assert any("pip setup error" in msg and tag == "err" for msg, tag in app.logged)
+    assert app._child is None
+
+
+def test_a_quit_install_thread_runs_no_more_checks(setup, monkeypatch):
+    """Even the quick Python checks start nothing once setup has quit."""
+    app, scripts = setup
+    monkeypatch.setattr(gui, "_find_embedded_python",
+                        lambda root: pytest.fail("checked Python after the quit"))
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app.root.destroy = mock.Mock()
+    app._on_finish = mock.Mock()
+    app.installing = True
+    app._close()
+    app._run_install()
+    app._on_finish.assert_not_called()
+
+
+def test_after_the_window_closes_setup_lets_the_install_thread_finish_quitting():
+    """A pip that was starting as setup quit is only ended once Popen returns,
+    by the install thread, so Python must not exit before it gets the chance."""
+    app = window()
+    app._worker = mock.Mock()
+    app.run()
+    app.root.mainloop.assert_called_once()
+    app._worker.join.assert_called_once_with(timeout=gui.QUIT_GRACE)

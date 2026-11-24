@@ -242,6 +242,15 @@ def _download_with_progress(url: str, callback=None) -> bytes:
 # How long pip may take over the packages before setup gives up on it.
 PIP_TIMEOUT = 600
 
+# How long setup waits, once its window has closed, for the install thread to
+# end a child process that was still starting when Quit was pressed.
+QUIT_GRACE = 5
+
+
+class _Quit(BaseException):
+    """Setup was quit. Not an Exception, so nothing on the way out catches it,
+    and the install thread stops without starting anything more."""
+
 
 def _pip_step(line: str) -> str | None:
     """What a line of pip's output says it is doing, short enough for the
@@ -316,7 +325,13 @@ class InstallerApp:
         self.installing = False
         self.install_done = False
         self.python_path: str | None = None
-        self._pip: subprocess.Popen | None = None
+        # Quit sets _quit and ends _child, the process the install thread is
+        # waiting on. Neither thread holds the lock for more than a moment,
+        # so Quit never waits on the install thread.
+        self._quit = threading.Event()
+        self._child_lock = threading.Lock()
+        self._child: subprocess.Popen | None = None
+        self._worker: threading.Thread | None = None
 
         self._build_ui()
 
@@ -474,15 +489,21 @@ class InstallerApp:
             return
         self.installing = True
         self.install_btn.configure(state="disabled", bg="#555555", text="Installing...")
-        threading.Thread(target=self._run_install, daemon=True).start()
+        self._worker = threading.Thread(target=self._run_install, daemon=True)
+        self._worker.start()
 
     def _run_install(self):
         try:
             self._do_install()
+        except _Quit:
+            pass
         except Exception as exc:
-            self.root.after(0, self._log, f"\nFatal error: {exc}", "err")
+            if not self._quit.is_set():
+                self.root.after(0, self._log, f"\nFatal error: {exc}", "err")
         finally:
-            self.root.after(0, self._on_finish)
+            # After a quit the window is gone, with nobody to tell.
+            if not self._quit.is_set():
+                self.root.after(0, self._on_finish)
 
     def _on_finish(self):
         self.installing = False
@@ -503,11 +524,39 @@ class InstallerApp:
                 "Resolve until you run setup again.\n\nQuit anyway?",
                 icon="warning", default="no", parent=self.root):
             return
-        # pip has no window, so left running it would go on installing unseen.
-        pip = self._pip
-        if pip is not None:
-            pip.kill()
+        # A child process has no window, so left running it would go on
+        # installing unseen. One still starting is ended by the install
+        # thread, which sees _quit once Popen returns.
+        with self._child_lock:
+            self._quit.set()
+            child = self._child
+        if child is not None:
+            child.kill()
         self.root.destroy()
+
+    def _check_quit(self):
+        """Stop the install thread here if setup has been quit."""
+        if self._quit.is_set():
+            raise _Quit()
+
+    def _launch(self, args: list[str], **kwargs) -> subprocess.Popen:
+        """Start a child process that Quit can end. After a quit none starts,
+        and one that was starting as Quit was pressed is ended at once."""
+        self._check_quit()
+        child = subprocess.Popen(args, **kwargs, **_NO_WINDOW)
+        with self._child_lock:
+            quit_meanwhile = self._quit.is_set()
+            if not quit_meanwhile:
+                self._child = child
+        if quit_meanwhile:
+            child.kill()
+            raise _Quit()
+        return child
+
+    def _release(self, child: subprocess.Popen):
+        with self._child_lock:
+            if self._child is child:
+                self._child = None
 
     # ---- Embedded Python: Windows -----------------------------------------
 
@@ -560,14 +609,24 @@ class InstallerApp:
         get_pip_path.write_bytes(pip_data)
 
         try:
-            result = subprocess.run(
+            # Started like pip itself, so Quit can end it.
+            child = self._launch(
                 [python_exe, str(get_pip_path), "--no-warn-script-location"],
-                capture_output=True, text=True, timeout=120,
-                cwd=str(python_dir), **_NO_WINDOW,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=str(python_dir),
             )
-            if result.returncode != 0:
+            try:
+                _, stderr = child.communicate(timeout=120)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.communicate()
+                raise
+            finally:
+                self._release(child)
+            self._check_quit()
+            if child.returncode != 0:
                 self.root.after(0, self._log,
-                                f"  pip setup failed: {result.stderr.strip()[:200]}", "err")
+                                f"  pip setup failed: {stderr.strip()[:200]}", "err")
                 return None
         except Exception as exc:
             self.root.after(0, self._log, f"  pip setup error: {exc}", "err")
@@ -645,6 +704,7 @@ class InstallerApp:
 
         self.root.after(0, self._set_progress, 30, "Verifying Python...")
 
+        self._check_quit()
         if not _check_python(python_exe):
             self.root.after(0, self._log, "  Extracted Python is not working.", "err")
             return None
@@ -671,13 +731,12 @@ class InstallerApp:
         self.root.after(0, self._pulse, "Installing packages...")
         try:
             # Unbuffered, or pip's lines would arrive in blocks.
-            proc = subprocess.Popen(pip_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, errors="replace",
-                                    env={**os.environ, "PYTHONUNBUFFERED": "1"}, **_NO_WINDOW)
+            proc = self._launch(pip_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors="replace",
+                                env={**os.environ, "PYTHONUNBUFFERED": "1"})
         except OSError:
             self.root.after(0, self._log, "  Could not run pip.", "err")
             return False
-        self._pip = proc
 
         timed_out = threading.Event()
 
@@ -699,7 +758,8 @@ class InstallerApp:
             proc.wait()
         finally:
             timer.cancel()
-            self._pip = None
+            self._release(proc)
+        self._check_quit()
         if timed_out.is_set():
             self.root.after(0, self._log, "  Timed out after 10 minutes.", "err")
             return False
@@ -742,9 +802,12 @@ class InstallerApp:
         self.root.after(0, self._log, "\nLooking for Python...")
         self.root.after(0, self._set_progress, 12, "Looking for Python...")
 
+        # Each check runs Python, so none starts once setup has been quit.
+        self._check_quit()
         python_path = _find_embedded_python(self.repo_root)
         python_source = "embedded"
 
+        self._check_quit()
         if python_path:
             self.root.after(0, self._log,
                             f"  Using bundled Python: {_python_version_str(python_path)}", "ok")
@@ -752,6 +815,7 @@ class InstallerApp:
             python_path = _find_system_python()
             python_source = "system"
 
+        self._check_quit()
         if python_path and python_source == "system":
             self.root.after(0, self._log,
                             f"  Found: {_python_version_str(python_path)}", "ok")
@@ -829,6 +893,11 @@ class InstallerApp:
 
     def run(self):
         self.root.mainloop()
+        # The window is gone. A child that was starting as Quit was pressed
+        # is ended by the install thread once Popen returns, so Python waits
+        # a little for it before exiting, which would halt that thread.
+        if self._worker is not None:
+            self._worker.join(timeout=QUIT_GRACE)
 
 
 def main():
