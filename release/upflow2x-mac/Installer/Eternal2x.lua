@@ -969,7 +969,7 @@ local WINDOW = themed([[
     QComboBox:focus { border-color: $text; }
     QComboBox QAbstractItemView {
         background-color: $field; border: 1px solid $line; outline: none;
-        selection-background-color: $hover; selection-color: $text;
+        selection-background-color: $soft; selection-color: $field;
     }
     QSlider::groove:horizontal { height: 3px; border-radius: 1px; background-color: $field; }
     QSlider::sub-page:horizontal { border-radius: 1px; background-color: $soft; }

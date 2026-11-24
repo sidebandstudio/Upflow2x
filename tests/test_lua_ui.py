@@ -471,6 +471,14 @@ def contrast(a, b):
     return (high + 0.05) / (low + 0.05)
 
 
+def test_dropdown_highlight_distinguishes_the_row_and_keeps_its_text_legible(lua, direct):
+    panel = load(lua, ui_script(direct))
+    popup = style_rule(panel.window.__attrs.StyleSheet, "QComboBox QAbstractItemView")
+    highlight = popup["selection-background-color"]
+    assert contrast(highlight, popup["background-color"]) >= 3
+    assert contrast(highlight, popup["selection-color"]) >= 4.5
+
+
 def test_text_on_the_panel_reads_at_4_5_to_1_or_better(lua, direct):
     """The version and the hints under the links were 3.4:1 on the panel's grey."""
     H = load(lua, ui_script(direct))
