@@ -34,7 +34,11 @@ local function new_widget(spec)
     function w:GetItem(i) return self.__entries[i + 1] end
     function w:Count() return #self.__entries end
     function w:Clear() self.__entries = {} end
-    function w:Start() self.__running = true end
+    -- H.timer_start_fails models a timer that exists but will not start.
+    function w:Start()
+        if H.timer_start_fails then error("the timer would not start") end
+        self.__running = true
+    end
     function w:Stop() self.__running = false end
 
     if w.Enabled == nil then w.Enabled = true end

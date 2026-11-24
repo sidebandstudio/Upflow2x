@@ -1221,8 +1221,17 @@ local RUN_KIND = nil
 --             shows. Set once the timer is made
 --   changed   something was shown or hidden, or a label's height changed
 --   fit_again ask for the window's height once more on the next tick
+--   ticked    a tick has reached the panel. With a timer made, `since` is
+--             when the panel was ready for one
+--   recover   what the run the panel owns, not followed, still needs, which
+--             keeps its way in on screen until it is handled:
+--               "pending"  a finished render not yet imported
+--               "failed"   a failure no panel has shown, from its status or
+--                          only its exit code
+--               "stale"    a run that went quiet, which Reset can clear
+--               "gave_up"  Reset gave up on it, and it may still finish
 local view = {
-    page = "main", timed = false, changed = false, fit_again = false,
+    page = "main", timed = false, changed = false, fit_again = false, ticked = false,
     source_height = 18, status_height = 17, progress_height = 16,
     -- What each page shows. Everything else shows on both, or as a run needs it.
     main = { "SettingsBtn", "UpscaleCB", "UpscaleMode", "InterpCB", "InterpMode", "SmoothBtn" },
@@ -1274,9 +1283,16 @@ end
 -- something to say: the bar while there is progress, a message other than
 -- Ready, or one the clip's line, or in Settings the analysis line, already
 -- says, unless it answers a press, Show Original and Show in Folder once
--- they have a render, Stop while a run goes, and Refresh Progress while a
--- run goes, without a timer, or when a message asks for it.
+-- they have a render, Stop while a run goes, and Reset for a run that went
+-- quiet. Refresh Progress shows while a run goes or the run the panel owns
+-- needs something, without a working timer, and always in Settings, as a
+-- timer can stall with no sign.
 local function show_what_matters()
+    -- A timer made, and no tick a few seconds after the panel was ready for
+    -- one, is a timer that does not reach the panel.
+    if view.timed and not view.ticked and view.since and os.time() - view.since >= 3 then
+        view.timed = false
+    end
     local function set(id, shown)
         if view.shown[id] ~= shown then
             view.shown[id] = shown
@@ -1296,8 +1312,8 @@ local function show_what_matters()
         and not (settings and said == items.AnalysisLabel.Text))
     set("CompareBtn", items.CompareBtn.Enabled == true)
     set("FolderBtn", items.FolderBtn.Enabled == true)
-    set("CancelBtn", RUNNING)
-    set("RefreshStatusBtn", RUNNING or not view.timed or said:find("Refresh Progress", 1, true) ~= nil)
+    set("CancelBtn", RUNNING or view.recover == "stale")
+    set("RefreshStatusBtn", RUNNING or view.recover ~= nil or not view.timed or settings)
     set("Meta", (items.Meta.Text or "") ~= "")
     if view.changed then
         view.changed = false
@@ -1903,6 +1919,7 @@ local function apply_status(st)
         -- Handled now. Left in place, Refresh Progress in a reopened panel
         -- would import the same render again.
         os.remove(STATUS_PATH)
+        view.recover = nil
         set_busy(false)
         if not st.ok then
             set_progress(0, nil)
@@ -2011,6 +2028,8 @@ local function poll()
     -- Python exited without saying it was done: it could not start, could not
     -- load a package, or crashed. Its last words are the end of the log.
     local why = last_log_line() or ("Python exited with code " .. exited .. ".")
+    -- Shown now, with its log.
+    view.recover = nil
     set_busy(false)
     set_progress(0, nil)
     -- The status box fits three lines, and the log's path took two of them.
@@ -2082,6 +2101,12 @@ end
 local pick_source
 local last_spot = nil
 local function on_timeout(ev)
+    -- Ticks reach the panel, so it needs no Refresh Progress on the main view.
+    view.ticked = true
+    if not view.timed then
+        view.timed = true
+        show_what_matters()
+    end
     -- Once, the tick after a change, by when Qt has laid the window out.
     if view.fit_again then fit_window() end
     view.fit_again = false
@@ -2106,9 +2131,13 @@ if have_timer and timer then
     view.timed = true
 end
 
+-- A timer that will not start is no timer, so Refresh Progress shows.
 local function start_polling()
-    if have_timer and timer and timer.Start then
-        pcall(function() timer:Start() end)
+    if not (have_timer and timer) then return end
+    local started = timer.Start ~= nil and pcall(function() timer:Start() end)
+    if not started and view.timed then
+        view.timed = false
+        show_what_matters()
     end
 end
 
@@ -2128,6 +2157,7 @@ local PENDING = "A finished render has not been added yet. "
 local function settle(st)
     if RUNNING then return apply_status(st) end
     if st.ok and st.import_path ~= "" then
+        view.recover = "pending"
         set_status(PENDING)
         return true
     end
@@ -2262,6 +2292,8 @@ local function launch(ended, extra, marks)
     if ended then
         for _, path in pairs(run_files(last)) do os.remove(path) end
     end
+    -- The new run is the one the panel owns, so the last one's needs go.
+    view.recover = nil
     LAUNCHED_AT = os.time()
     start_polling()
     return true
@@ -2437,13 +2469,19 @@ end
 
 function win.On.RefreshStatusBtn.Clicked(ev)
     -- A finished run's status is gone once handled, but the shell can still
-    -- write the exit code after it, so that alone is not a run to report on.
-    -- A run this panel started is polled even before Python reports, so one
-    -- that never started is caught.
-    if not read_status() and not RUNNING then
+    -- write the exit code after it, so that alone is not a run to report on:
+    -- a successful run leaves 0 behind. A run this panel started is polled
+    -- even before Python reports, so one that never started is caught, and
+    -- so is a failure no panel has shown, or a run Reset gave up on that
+    -- died after all, from only their exit code.
+    local exited = read_exit_code()
+    local unshown = (view.recover == "failed" or view.recover == "gave_up")
+        and exited ~= nil and exited ~= "0"
+    if not read_status() and not RUNNING and not unshown then
         -- Without a timer, this is also how the card catches up.
         pick_source(true)
-        set_status("No run in progress.")
+        set_status(view.recover == "gave_up" and "The run you reset has not finished."
+            or "No run in progress.")
         return
     end
     poll()
@@ -2493,6 +2531,8 @@ function win.On.CancelBtn.Clicked(ev)
     -- The exit code stays: it shows the run has ended, so the next run can
     -- clear its files.
     os.remove(STOP_PATH)
+    -- A run given up on can still finish, so Refresh Progress stays to look.
+    view.recover = giving_up and "gave_up" or nil
     ANALYSING = false
     IMPORTED = false
     set_busy(false)
@@ -2605,21 +2645,37 @@ else
     refresh_source()
     start_polling()
     set_status(SOURCE_PATH and "Ready." or items.SourceLabel.Text)
-    local waiting = read_status()
-    if run_in_progress() then
+    -- One look at the run the panel owns, as an earlier panel left it.
+    local state, waiting, exited = look()
+    local failed = exited ~= nil and exited ~= "0"
+    if state == "live" then
         -- Closed mid-run and reopened: follow that run, and import it when done.
         set_busy(true)
         start_polling()
         set_status("A run started earlier is still going. Its progress shows here.")
-    elseif waiting and waiting.done and waiting.ok and waiting.import_path ~= "" then
+    elseif state == "finished" and waiting.ok and waiting.import_path ~= "" then
         -- It finished after its panel closed, so nothing has imported it, and
         -- the next run would delete its status unseen.
         LAST_OUTPUT = render_location(waiting)
         items.FolderBtn.Enabled = LAST_OUTPUT ~= nil
+        view.recover = "pending"
         set_status(WAITING)
-    elseif AUTO_UPDATE then
-        run_update(true)
+    else
+        if (state == "finished" and not waiting.ok and waiting.message ~= "Stopped.")
+                or (state == "gone" and failed) then
+            -- It failed after its panel closed. A successful run leaves
+            -- exit code 0 behind, which is no failure.
+            view.recover = "failed"
+            set_status("The last run did not finish. Press Refresh Progress to see why.")
+        elseif state == "gone" and waiting and not exited then
+            -- Quiet too long, with no exit code to say it ended.
+            view.recover = "stale"
+            set_status("A run started earlier stopped reporting. Press Reset to clear it.")
+        end
+        if AUTO_UPDATE then run_update(true) end
     end
 end
 
+-- Ticks can only arrive from here on.
+view.since = os.time()
 disp:RunLoop()

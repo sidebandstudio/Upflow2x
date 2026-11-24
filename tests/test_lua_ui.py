@@ -321,10 +321,11 @@ def test_a_byte_order_mark_in_version_does_not_leak_into_the_title(lua, direct):
 
 MAIN_VIEW = {"Title", "Badge", "SettingsBtn", "SourceLabel", "UpscaleCB", "UpscaleMode",
              "InterpCB", "InterpMode", "SmoothBtn"}
+# Refresh Progress is always in Settings, for a timer that stalls.
 SETTINGS_VIEW = {"Title", "Badge", "BackBtn", "SourceLabel", "AnalyseBtn", "ThresholdLabel",
                  "ThresholdSlider", "ThresholdValue", "AnalysisLabel", "OutputLabel",
                  "FormatCombo", "FolderLabel", "FolderCombo", "SubTitle", "NeedsInfo",
-                 "UpdateBtn"}
+                 "UpdateBtn", "RefreshStatusBtn"}
 FEEDBACK = {"ProgressBar", "Progress", "Status", "CompareBtn", "FolderBtn",
             "RefreshStatusBtn", "CancelBtn", "Meta"}
 
@@ -515,6 +516,156 @@ def test_back_asks_for_the_smaller_page_once_more_on_the_next_tick(lua, direct):
     assert len(H.resizes) == asked + 1 and H.size[2] == main
     H.fire("PollTimer", "Timeout")
     assert len(H.resizes) == asked + 1, "it resized on a tick with nothing new"
+
+
+# --------------------------------------------------------------------------
+# a run that needs looking at keeps its way in on screen
+# --------------------------------------------------------------------------
+
+def press(H, control):
+    """Click a control the way a person can: only while it shows."""
+    assert control in shown(H), f"{control} is not on screen to press"
+    H.click(control)
+
+
+def test_a_waiting_render_keeps_refresh_through_other_messages_and_imports_once(lua, direct):
+    """Its Refresh Progress showed only while the status said to press it, so
+    an update check in Settings took the only way to the render away."""
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Done.",
+                 import_path=str(direct / "shot_smooth.mp4"))
+    H = load(lua, ui_script(direct))
+    assert "RefreshStatusBtn" in shown(H)
+    press(H, "SettingsBtn")
+    press(H, "UpdateBtn")
+    assert "Refresh Progress" not in H.status()
+    press(H, "BackBtn")
+    assert "RefreshStatusBtn" in shown(H), "the waiting render lost its way in"
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert "RefreshStatusBtn" not in shown(H)
+    press(H, "SettingsBtn")
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1
+
+
+def test_a_run_that_failed_while_the_panel_was_closed_can_be_looked_up(lua, direct):
+    write_status(direct, done=True, ok=False, message="The clip's media is missing.")
+    run_file(direct, "log").write_text("Traceback (most recent call last):\nOSError: gone\n")
+    run_file(direct, "exit").write_text("2\n")
+    H = load(lua, ui_script(direct))
+    assert {"Status", "RefreshStatusBtn"} <= shown(H) and "CancelBtn" not in shown(H)
+    press(H, "RefreshStatusBtn")
+    assert H.status() == "The clip's media is missing."
+    assert "FolderBtn" in shown(H) and H.text_of("FolderBtn") == "Open Log"
+    assert "RefreshStatusBtn" not in shown(H)
+
+
+def test_a_run_that_died_while_the_panel_was_closed_can_be_looked_up(lua, direct):
+    """Python could not start, so only its exit code and its log are left."""
+    run_file(direct, "log").write_text("ModuleNotFoundError: No module named 'cv2'\n")
+    run_file(direct, "exit").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert {"Status", "RefreshStatusBtn"} <= shown(H)
+    press(H, "RefreshStatusBtn")
+    assert "No module named 'cv2'" in H.status()
+    assert "FolderBtn" in shown(H) and H.text_of("FolderBtn") == "Open Log"
+
+
+def test_a_finished_runs_exit_code_left_behind_is_no_error(lua, direct):
+    run_file(direct, "exit").write_text("0\n")
+    run_file(direct, "log").write_text("Done.\n")
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+    press(H, "SettingsBtn")
+    press(H, "RefreshStatusBtn")
+    assert H.status() == "No run in progress."
+    assert "FolderBtn" not in shown(H)
+
+
+def test_a_run_that_went_quiet_while_closed_shows_its_progress_and_resets_in_one_press(
+        lua, direct):
+    import time
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    H = load(lua, ui_script(direct))
+    assert {"Status", "RefreshStatusBtn", "CancelBtn"} <= shown(H)
+    assert H.text_of("CancelBtn") == "Reset"
+    press(H, "RefreshStatusBtn")
+    assert "30%" in H.widgets["Progress"].Text and "No progress" in H.status()
+    press(H, "CancelBtn")
+    assert H.status() == GAVE_UP
+    assert "CancelBtn" not in shown(H) and "RefreshStatusBtn" in shown(H)
+
+
+def test_a_render_that_finishes_after_reset_imports_with_refresh_and_no_new_render(lua, direct):
+    """Refresh Progress used to be always there for it. Nothing else would
+    bring in a render that Reset gave up on and that finished after all."""
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    press(H, "RefreshStatusBtn")
+    press(H, "CancelBtn")
+    assert H.status() == GAVE_UP
+    commands = H.command_count()
+    press(H, "RefreshStatusBtn")
+    assert H.status() == "The run you reset has not finished."
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/late.mp4", updated=time.time())
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1 and H.imported_at(1) == "/tmp/late.mp4"
+    assert H.placements[1].recordFrame == 86400, "it did not go where its clip is"
+    assert H.command_count() == commands, "a new render started"
+    assert "RefreshStatusBtn" not in shown(H)
+
+
+def test_a_reset_run_that_dies_after_all_shows_why(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    press(H, "RefreshStatusBtn")
+    press(H, "CancelBtn")
+    run_file(direct, "log").write_text("MemoryError\n")
+    run_file(direct, "exit").write_text("1\n")
+    press(H, "RefreshStatusBtn")
+    assert "MemoryError" in H.status() and H.text_of("FolderBtn") == "Open Log"
+
+
+def test_a_new_run_clears_what_the_last_one_needed(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    press(H, "RefreshStatusBtn")
+    press(H, "CancelBtn")
+    press(H, "SmoothBtn")
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/new.mp4", updated=time.time())
+    press(H, "RefreshStatusBtn")
+    assert H.imported_at(1) == "/tmp/new.mp4"
+    assert not shown(H) & {"RefreshStatusBtn", "CancelBtn"}
+
+
+def test_a_timer_that_cannot_start_leaves_refresh_on_the_main_view(lua, direct):
+    H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
+    H.timer_start_fails = True
+    H.under_playhead = False
+    H.load(str(ui_script(direct)), "/media/shot.mov")
+    assert "RefreshStatusBtn" in shown(H)
+    H.under_playhead = True
+    press(H, "RefreshStatusBtn")
+    assert H.text_of("SourceLabel") == "shot.mov"
+
+
+def test_a_timer_whose_ticks_never_arrive_puts_refresh_back(lua, direct):
+    H = load(lua, ui_script(direct))
+    assert "RefreshStatusBtn" not in shown(H)
+    advance_clock(lua, 5)
+    press(H, "SettingsBtn")
+    press(H, "BackBtn")
+    assert "RefreshStatusBtn" in shown(H), "no tick came, and nothing reads the clip again"
+    H.fire("PollTimer", "Timeout")
+    assert "RefreshStatusBtn" not in shown(H), "a tick came after all"
 
 
 AMBER = "#f2a93b"
