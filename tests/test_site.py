@@ -363,6 +363,56 @@ def test_the_change_notes_leave_availability_to_the_download_page(repo_root):
 
 
 # --------------------------------------------------------------------------
+# the panel's two views
+# --------------------------------------------------------------------------
+#
+# In 0.5.2 the main panel has the clip, Upscaling, Interpolate and Render, and
+# Settings opens the rest until Back. These check the docs against that agreed
+# layout. The button tests above check them against Installer/Eternal2x.lua.
+
+SETTINGS_VIEW = ("Analyse", "Threshold", "Output", "Save to", "Check for Updates")
+
+
+def plain(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>|\*\*", "", text))
+
+
+def readme(repo_root) -> str:
+    return (repo_root / "README.md").read_text(encoding="utf-8")
+
+
+def test_render_needs_no_analyse_and_marking_stays_optional(repo_root):
+    """Render finds the drawings on a clip with no markers, so the everyday
+    steps go straight to Render, and Analyse comes after them as optional."""
+    usage = re.search(r'<section id="usage".*?</section>', page(repo_root, "help.html"), re.S).group()
+    steps, after = usage.split("</ol>", 1)
+    headings = re.findall(r"<h3>(.*?)</h3>", steps)
+    assert "Render" in headings
+    assert not [h for h in headings if re.search(r"analyse|threshold", h, re.I)], headings
+    assert "Analyse" in after and "optional" in after.lower()
+
+    using = readme(repo_root).split("## Using it")[1].split("\n### Settings")[0]
+    quick = re.match(r"\s*((?:\d+\. .*\n(?: {3}.*\n)*)+)", using).group(1)
+    assert "Render" in quick and not re.search(r"Analyse|Threshold", quick), quick
+    assert "Analyse" in using and "optional" in using.lower()
+
+
+@pytest.mark.parametrize("doc", ["help.html", "README.md"])
+def test_settings_names_its_controls_the_way_back_and_both_versions(repo_root, doc):
+    """In 0.5.2 Settings holds the controls off the main panel, and Back
+    returns. 0.5.1 has them all on the main panel, so both versions appear."""
+    if doc == "help.html":
+        section = re.search(r'<section id="settings".*?</section>', page(repo_root, doc), re.S).group()
+    else:
+        section = readme(repo_root).split("\n### Settings\n")[1].split("\n###")[0]
+    text = plain(section)
+    missing = [control for control in SETTINGS_VIEW if control.lower() not in text.lower()]
+    assert not missing, f"{doc} Settings never names {missing}"
+    assert re.search(r"\bback\b[^.]*\bmain panel\b", text, re.I), f"{doc} never says how to get back"
+    assert "0.5.1" in text and "0.5.2" in text
+
+
+# --------------------------------------------------------------------------
 # the download page's release list
 # --------------------------------------------------------------------------
 #
