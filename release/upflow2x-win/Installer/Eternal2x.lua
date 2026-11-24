@@ -228,6 +228,9 @@ local REVEAL_SCRIPT = join_path(RUN_DIR, ".eternal2x_reveal.cmd")
 --           a Windows command line
 --   script  the command a run starts from on Windows
 --   log     everything the run printed
+--   seen    a panel has shown how the run ended, written by the panel. The
+--           shell writes the exit code after that, 1 after a Stop, and this
+--           keeps a panel opened later from taking it for a failure no one saw
 -- Python finds tmp and stop beside the status, so they follow its name. A
 -- run the panel has given up on can still be writing, and with files of its
 -- own it never writes over, stops or ends the run after it. Tag "" is the one
@@ -238,12 +241,12 @@ local function run_files(tag)
         names = { status = ".eternal2x_status.json", tmp = ".eternal2x_status.tmp",
                   stop = ".eternal2x_status.stop", exit = ".eternal2x_exit",
                   marks = ".eternal2x_marks.txt", script = ".eternal2x_run.cmd",
-                  log = ".upflow2x_last_run.log" }
+                  log = ".upflow2x_last_run.log", seen = ".upflow2x_last_run.seen" }
     else
         local base = ".upflow2x_run-" .. tag
         names = { status = base .. ".json", tmp = base .. ".tmp", stop = base .. ".stop",
                   exit = base .. ".exit", marks = base .. ".marks", script = base .. ".cmd",
-                  log = base .. ".log" }
+                  log = base .. ".log", seen = base .. ".seen" }
     end
     for kind, name in pairs(names) do names[kind] = join_path(RUN_DIR, name) end
     return names
@@ -1909,6 +1912,13 @@ local function render_location(st)
     return st.import_path
 end
 
+-- Marks the run the panel owns as one whose end a panel has shown, among
+-- that run's own files, so it goes with them and says nothing of another run.
+local function mark_seen()
+    local f = io.open(run_files(RUN_TAG).seen, "w")
+    if f then f:close() end
+end
+
 local function apply_status(st)
     if not st then return false end
     set_progress(st.fraction, st.stage .. time_left(st))
@@ -1919,6 +1929,7 @@ local function apply_status(st)
         -- Handled now. Left in place, Refresh Progress in a reopened panel
         -- would import the same render again.
         os.remove(STATUS_PATH)
+        mark_seen()
         view.recover = nil
         set_busy(false)
         if not st.ok then
@@ -1996,6 +2007,18 @@ end
 -- report it, as when its window is closed.
 local STALLED_AFTER = 180
 
+-- The run the panel owns reports again, after a stall this panel saw, or as
+-- one it found quiet when it opened or Reset gave up on. It is followed as
+-- a run going, with Stop and its progress, and what was said while it was
+-- quiet goes. The timer, started as the panel opened, reads it from here on.
+local function follow_again(st)
+    view.recover = nil
+    LAUNCHED_AT = st and st.updated or LAUNCHED_AT
+    set_busy(true)
+    if st then set_progress(st.fraction, st.stage) end
+    set_status("The run is reporting again. Its progress shows here.")
+end
+
 local function poll()
     stop_unasked()
     local exited = read_exit_code()
@@ -2016,11 +2039,11 @@ local function poll()
             items.CancelBtn.Text = "Reset"
             set_status(string.format("No progress for %d minutes, so the run has stopped. "
                 .. "Press Reset and run it again.", math.floor(quiet / 60 + 0.5)))
-        elseif (items.Status.Text or ""):match("^No progress for")
-            or (items.Status.Text or ""):match("^Python has not started") then
-            -- It is reporting again, so the warning no longer holds.
-            items.CancelBtn.Text = "Stop"
-            set_status("Working. Resolve stays usable while this runs.")
+        elseif st and st.updated and math.abs(os.time() - st.updated) < STALLED_AFTER
+                and (not RUNNING or items.CancelBtn.Text ~= "Stop") then
+            -- Fresh progress from a run the panel had stopped following, or
+            -- offered Reset for, so the warning no longer holds.
+            follow_again(st)
         end
         return false
     end
@@ -2029,6 +2052,7 @@ local function poll()
     -- load a package, or crashed. Its last words are the end of the log.
     local why = last_log_line() or ("Python exited with code " .. exited .. ".")
     -- Shown now, with its log.
+    mark_seen()
     view.recover = nil
     set_busy(false)
     set_progress(0, nil)
@@ -2249,7 +2273,8 @@ local function launch(ended, extra, marks)
         RUNS_STARTED = RUNS_STARTED + 1
         tag = string.format("%d-%d-%s", os.time(), RUNS_STARTED,
                             ((tostring({}):gsub("%W", "")):sub(-6)))
-    until not (exists(run_files(tag).status) or exists(run_files(tag).exit))
+    until not (exists(run_files(tag).status) or exists(run_files(tag).exit)
+               or exists(run_files(tag).seen))
     local files = run_files(tag)
     -- Named for the run, so another panel starting one at the same time
     -- never puts its tag in this one's place.
@@ -2491,7 +2516,15 @@ function win.On.CancelBtn.Clicked(ev)
     -- One look decides, and nothing reads the run again to change its mind.
     -- With two reads, a run that finished in between was taken for gone, and
     -- its result was cleared before the import.
+    local offered = items.CancelBtn.Text
     local state, st, exited = look()
+    if state == "live" and offered ~= "Stop" then
+        -- Pressed as Reset, for a run that went quiet and has reported again
+        -- since. That press only follows it again: only presses of a button
+        -- that says Stop end a run.
+        follow_again(st)
+        return
+    end
     if state == "live" then
         stop_unasked()
         if not STOP_ASKED then
@@ -2661,10 +2694,12 @@ else
         view.recover = "pending"
         set_status(WAITING)
     else
-        if (state == "finished" and not waiting.ok and waiting.message ~= "Stopped.")
-                or (state == "gone" and failed) then
-            -- It failed after its panel closed. A successful run leaves
-            -- exit code 0 behind, which is no failure.
+        local seen = exists(run_files(RUN_TAG).seen)
+        if not seen and ((state == "finished" and not waiting.ok and waiting.message ~= "Stopped.")
+                or (state == "gone" and failed)) then
+            -- It failed after its panel closed. A successful run leaves exit
+            -- code 0 behind, which is no failure, and a run whose end a panel
+            -- showed, a Stop or a failure, leaves its own, seen.
             view.recover = "failed"
             set_status("The last run did not finish. Press Refresh Progress to see why.")
         elseif state == "gone" and waiting and not exited then

@@ -668,6 +668,153 @@ def test_a_timer_whose_ticks_never_arrive_puts_refresh_back(lua, direct):
     assert "RefreshStatusBtn" not in shown(H), "a tick came after all"
 
 
+def stop_a_render(H, root):
+    """Render, end it with two presses of Stop, and see it report Stopped."""
+    import time
+    press(H, "SmoothBtn")
+    write_status(root, fraction=0.4, updated=time.time())
+    press(H, "CancelBtn")
+    press(H, "CancelBtn")
+    write_status(root, fraction=0.4, done=True, ok=False, message="Stopped.",
+                 updated=time.time())
+    press(H, "RefreshStatusBtn")
+    assert H.status() == "Stopped."
+
+
+@pytest.mark.parametrize("exit_arrives", ["before reopening", "after reopening"])
+def test_a_stop_seen_before_closing_is_no_failure_when_reopened(lua, direct, exit_arrives):
+    """Python exits 1 after a Stop, and the shell writes that once it has. The
+    panel had shown Stopped, and opened again it said the run did not finish."""
+    H = load(lua, ui_script(direct))
+    stop_a_render(H, direct)
+    if exit_arrives == "before reopening":
+        run_file(direct, "exit").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+    run_file(direct, "exit").write_text("1\n")
+    press(H, "SettingsBtn")
+    press(H, "RefreshStatusBtn")
+    assert H.status() == "No run in progress." and "FolderBtn" not in shown(H)
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+    assert run_file(direct, "exit").exists(), "the proof the run ended went"
+
+
+def test_a_crash_seen_before_closing_is_not_shown_again_when_reopened(lua, direct):
+    H = load(lua, ui_script(direct))
+    die(H, direct)
+    assert "Stopped without finishing" in H.status()
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+
+
+@pytest.mark.parametrize("left", ["status", "exit only"])
+def test_an_unseen_failure_prompts_and_rests_once_it_is_seen(lua, direct, left):
+    """From a run before 0.5.2, under the names every run had then."""
+    if left == "status":
+        write_status(direct, done=True, ok=False, message="The clip's media is missing.")
+    run_file(direct, "log").write_text("ModuleNotFoundError: No module named 'cv2'\n")
+    run_file(direct, "exit").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert run_tag(direct) == ""
+    assert {"Status", "RefreshStatusBtn"} <= shown(H)
+    press(H, "RefreshStatusBtn")
+    assert ("media is missing" if left == "status" else "cv2") in H.status()
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+
+
+def test_the_next_runs_unseen_failure_prompts_after_one_was_seen(lua, direct):
+    """What a panel saw of one run never hides another run's failure."""
+    H = load(lua, ui_script(direct))
+    die(H, direct)
+    H = load(lua, ui_script(direct))
+    first = run_tag(direct)
+    press(H, "SmoothBtn")
+    assert run_tag(direct) != first
+    run_file(direct, "log").write_text("MemoryError\n")
+    run_file(direct, "exit").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert {"Status", "RefreshStatusBtn"} <= shown(H)
+    press(H, "RefreshStatusBtn")
+    assert "MemoryError" in H.status()
+
+
+REPORTING = "The run is reporting again. Its progress shows here."
+
+
+def reopen_over_a_quiet_run(lua, direct):
+    """A panel opened over a run that went quiet, which then reports again."""
+    import time
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    H = load(lua, ui_script(direct))
+    assert "CancelBtn" in shown(H) and H.text_of("CancelBtn") == "Reset"
+    write_status(direct, fraction=0.5, updated=time.time())
+    return H
+
+
+@pytest.mark.parametrize("separator", ["\\\\", "/"])
+def test_a_quiet_run_that_reports_again_is_followed_after_refresh(lua, direct, separator):
+    """Its progress came back, but Reset and the quiet prompt stayed, and a
+    press of the button labelled Reset armed Stop."""
+    lua.execute(f'package.config = "{separator}" .. package.config:sub(2)')
+    H = reopen_over_a_quiet_run(lua, direct)
+    press(H, "RefreshStatusBtn")
+    assert "50%" in H.widgets["Progress"].Text
+    assert H.text_of("CancelBtn") == "Stop" and H.status() == REPORTING
+    assert not H.enabled("SmoothBtn")
+    press(H, "CancelBtn")
+    assert not run_file(direct, "stop").exists()
+    press(H, "CancelBtn")
+    assert run_file(direct, "stop").exists()
+
+
+@pytest.mark.parametrize("separator", ["\\\\", "/"])
+def test_reset_pressed_after_a_quiet_run_reports_again_only_follows_it(lua, direct, separator):
+    """Pressed before anything read the run again, the button still said Reset."""
+    lua.execute(f'package.config = "{separator}" .. package.config:sub(2)')
+    H = reopen_over_a_quiet_run(lua, direct)
+    press(H, "CancelBtn")
+    assert not run_file(direct, "stop").exists()
+    assert H.text_of("CancelBtn") == "Stop" and H.status() == REPORTING
+    press(H, "CancelBtn")
+    assert not run_file(direct, "stop").exists(), "one press labelled Stop ended it"
+    assert H.status().startswith("Press Stop again")
+    press(H, "CancelBtn")
+    assert run_file(direct, "stop").exists()
+
+
+def test_reset_on_a_followed_run_that_reports_again_only_follows_it(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    press(H, "RefreshStatusBtn")
+    assert H.text_of("CancelBtn") == "Reset" and "No progress" in H.status()
+    write_status(direct, fraction=0.6, updated=time.time())
+    press(H, "CancelBtn")
+    assert not run_file(direct, "stop").exists()
+    assert H.text_of("CancelBtn") == "Stop" and H.status() == REPORTING
+    press(H, "CancelBtn")
+    press(H, "CancelBtn")
+    assert run_file(direct, "stop").exists()
+
+
+def test_a_quiet_run_that_reports_again_imports_once_when_it_finishes(lua, direct):
+    import time
+    H = reopen_over_a_quiet_run(lua, direct)
+    press(H, "RefreshStatusBtn")
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/late.mp4", updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert H.imported_count() == 1 and H.enabled("SmoothBtn")
+    assert "CancelBtn" not in shown(H)
+    H.fire("PollTimer", "Timeout")
+    press(H, "SettingsBtn")
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1
+
+
 AMBER = "#f2a93b"
 
 
