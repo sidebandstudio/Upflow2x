@@ -178,7 +178,7 @@ Then:
   It only works on an upscale with Interpolate off. A slowed render has no
   original to line up with.
 - **Show in Folder** opens the render's location. From 0.5.2, after a run
-  fails and leaves a log, the same button reads **Open Log** and opens that
+  fails and writes to its log, the same button reads **Open Log** and opens that
   log in Notepad on Windows or a text editor on a Mac.
 
 Renders go in an `Upflow2x` folder beside the project's cache folder, with a
@@ -284,10 +284,10 @@ afterwards.
 | "Every frame differs, but the differences look like grain" | Mark the drawings with M, then press **Render**. From the command line, `--grain` raises the threshold above the grain. |
 | "...has a variable frame rate" | Render the clip to a constant frame rate first, from Resolve or with ffmpeg, as the message says. |
 | Rendering is slow | The time grows with the length of the clip on your timeline, and only the part it uses is rebuilt, so trimming helps. On a Radeon RX 7900 XT, under three seconds of 1080p, upscaled and slowed to 190 frames at 4K, takes about 33 seconds. Without a GPU the in-betweens are drawn on the CPU, about ten times slower, and Super Scale upscales. |
-| Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel says so and shows its last error. From 0.5.2, **Open Log** then opens the whole log. If a run was interrupted, press **Reset**. |
+| Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel shows its last error or exit code. From 0.5.2, **Open Log** appears if the failed run wrote to its log. If a run was interrupted, press **Reset**. |
 | Resolve would not import the render | The render still finished. The panel prints where it is, so drag it into your media pool. Switching Output to `Image sequence` usually avoids this. |
 | Upscale skipped | Without a GPU the upscale is Super Scale, which needs Resolve Studio. |
-| Something else | Email the panel's status text and the `.upflow2x_last_run.log` file from the plugin folder. From 0.5.2, **Open Log** on the panel opens it after a failed run. Setup puts it in `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in. |
+| Something else | Send the panel's status text, including any exit code. If the failed run wrote to `.upflow2x_last_run.log`, include the file too. From 0.5.2, **Open Log** is available when the file has content. Setup puts it in `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in. |
 
 ## Development
 

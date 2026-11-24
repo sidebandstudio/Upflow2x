@@ -153,7 +153,7 @@
                     </li>
                     <li>
                         <h3>Compare</h3>
-                        <p><strong>Show Original</strong> switches the smoothed clip off so the original shows through, and Show Upflow2x switches it back. It only works on an upscale with Interpolate off, since a slowed render has no original to line up with. <strong>Show in Folder</strong> opens where the render was saved, as <a href="#folder">Where renders go</a> explains. From 0.5.2, after a run fails and leaves a log, the same button reads <strong>Open Log</strong> and opens that log in Notepad on Windows or a text editor on a Mac, ready to read or send to us.</p>
+                        <p><strong>Show Original</strong> switches the smoothed clip off so the original shows through, and Show Upflow2x switches it back. It only works on an upscale with Interpolate off, since a slowed render has no original to line up with. <strong>Show in Folder</strong> opens where the render was saved, as <a href="#folder">Where renders go</a> explains. From 0.5.2, if a failed run wrote to its log, the same button reads <strong>Open Log</strong> and opens that log in Notepad on Windows or a text editor on a Mac, ready to read or send to us.</p>
                     </li>
                 </ol>
             </section>
@@ -248,7 +248,7 @@
                         <summary>Progress seems stuck</summary>
                         <div class="answer">
                             <p>Press Refresh Progress. If the panel says Python hasn't started, or that there's been no progress for a few minutes, the run stopped. Press Reset and run it again.</p>
-                            <p>For anything else, email us the panel's status text and the <code>.upflow2x_last_run.log</code> file from the plugin folder. From 0.5.2, <strong>Open Log</strong> on the panel opens that file after a failed run. Setup puts it in <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code> on Windows or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code> on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in.</p>
+                            <p>For anything else, send the panel's status text, including any exit code. If the failed run wrote to <code>.upflow2x_last_run.log</code>, include that file too. From 0.5.2, <strong>Open Log</strong> is available when the file has content. Setup puts it in <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code> on Windows or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code> on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in.</p>
                         </div>
                     </details>
                     <details>
@@ -299,7 +299,7 @@
                 <ul class="changes">
                     <li>Mac setup checks its Python download with the certificates macOS ships, so it no longer stops with <code>CERTIFICATE_VERIFY_FAILED</code>.</li>
                     <li><strong>Stop</strong> takes a second press within five seconds, since stopping deletes the frames drawn so far.</li>
-                    <li>After a run fails, <strong>Open Log</strong> opens its log.</li>
+                    <li>If a failed run wrote to its log, <strong>Open Log</strong> opens it.</li>
                     <li>Setup names each package as it installs it, offers Try Again when it can't finish, and asks before you quit it partway.</li>
                 </ul>
                 <p>An update brings the panel changes to an existing install. The setup changes need setup v0.5.2 itself.</p>
