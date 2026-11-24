@@ -515,10 +515,10 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -.025em; }
 .older .retired th { color: var(--amber); border-top: 1px solid var(--line); }
 .older .retired td { color: #868684; }
 .older a { white-space: nowrap; }
-/* On a phone the dates give way, so the macOS column isn't scrolled out of view. */
 @media (max-width: 520px) {
-    .older th, .older td { padding-inline: 16px; }
-    .older th:nth-child(2), .older td:nth-child(2) { display: none; }
+    .older th, .older td { padding: 12px clamp(4px, 1.5vw, 8px); }
+    .older th { letter-spacing: normal; }
+    .older a { white-space: normal; }
 }
 
 /* help */
