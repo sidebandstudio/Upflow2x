@@ -2336,6 +2336,125 @@ def test_a_quiet_run_that_finishes_before_reset_is_imported(lua, direct):
     assert H.imported_count() == 1
 
 
+def finish_during_next_click(H, root, exited, **fields):
+    """The run publishes its finished status, and with exited its exit code,
+    right after the panel's next click first reads the status file."""
+    import time
+
+    def publish():
+        status = {"fraction": 1.0, "done": True, "ok": True, "message": "Rendered.",
+                  "import_path": str(root / "shot_smooth.mp4"), "updated": time.time()}
+        status.update(fields)
+        write_status(root, **status)
+        if exited:
+            (root / ".eternal2x_exit").write_text("0\n")
+
+    H.after_status_read = publish
+
+
+@pytest.mark.parametrize("asked", [False, True])
+@pytest.mark.parametrize("exited", [False, True])
+def test_a_render_that_finishes_during_a_stop_press_keeps_its_result(lua, direct, asked,
+                                                                       exited):
+    """The press read the run as going, the render finished, and a second
+    read found it gone, so the press cleared its result: Ready, no import."""
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    write_status(direct, fraction=0.9, updated=time.time())
+    if asked:
+        H.click("CancelBtn")
+    finish_during_next_click(H, direct, exited)
+    H.click("CancelBtn")
+    assert H.after_status_read is None, "the render did not finish during the press"
+    assert (direct / ".eternal2x_status.json").exists(), "Stop deleted the finished render"
+    assert H.status() != "Ready."
+    assert H.imported_count() == 0
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert "above the original" in H.status()
+    H.click("RefreshStatusBtn")
+    H.click("CancelBtn")
+    assert H.imported_count() == 1
+
+
+@pytest.mark.parametrize("reported", [False, True])
+@pytest.mark.parametrize("exited", [False, True])
+def test_a_quiet_render_that_finishes_during_reset_keeps_its_result(lua, direct, reported,
+                                                                     exited):
+    """Taken for gone by the look, it finished before Reset cleared up."""
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    if reported:
+        write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    else:
+        advance_clock(lua, 10 * 60)
+    H.click("RefreshStatusBtn")
+    assert H.text_of("CancelBtn") == "Reset"
+    finish_during_next_click(H, direct, exited)
+    H.click("CancelBtn")
+    assert H.after_status_read is None
+    assert H.imported_count() == 1
+    assert "above the original" in H.status()
+    assert not (direct / ".eternal2x_status.json.reset").exists()
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+
+
+@pytest.mark.parametrize("case", ["exited, no status", "exited mid-run", "went quiet",
+                                  "never reported"])
+def test_a_run_that_is_really_gone_resets_in_one_press(lua, direct, case):
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    if case == "exited mid-run":
+        write_status(direct, fraction=0.5, updated=time.time())
+    if case.startswith("exited"):
+        (direct / ".eternal2x_exit").write_text("1\n")
+    elif case == "went quiet":
+        write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    else:
+        advance_clock(lua, 10 * 60)
+    H.click("CancelBtn")
+    assert H.status() == "Ready."
+    assert H.enabled("SmoothBtn")
+    for name in (".eternal2x_status.json", ".eternal2x_status.json.reset",
+                 ".eternal2x_exit", ".eternal2x_status.stop"):
+        assert not (direct / name).exists(), name
+
+
+def test_reset_keeps_a_render_that_finished_while_the_panel_was_closed(lua, direct):
+    """The panel said to press Refresh Progress for it. Reset deleted it."""
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path=str(direct / "shot_smooth.mp4"))
+    H = load(lua, ui_script(direct))
+    H.click("CancelBtn")
+    assert (direct / ".eternal2x_status.json").exists()
+    assert "Press Refresh Progress to add it" in H.status()
+    assert H.imported_count() == 0
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+
+
+def test_reset_with_no_run_keeps_a_render_that_lands_during_it(lua, direct):
+    H = load(lua, ui_script(direct))
+    finish_during_next_click(H, direct, exited=True)
+    H.click("CancelBtn")
+    assert (direct / ".eternal2x_status.json").exists()
+    assert "Press Refresh Progress to add it" in H.status()
+    H.click("RefreshStatusBtn")
+    assert H.imported_count() == 1
+
+
+def test_reset_clears_an_old_failure_from_a_closed_panel(lua, direct):
+    write_status(direct, fraction=0.2, done=True, ok=False, message="The clip is missing.")
+    H = load(lua, ui_script(direct))
+    H.click("CancelBtn")
+    assert H.status() == "Ready."
+    assert not (direct / ".eternal2x_status.json").exists()
+
+
 def test_reset_of_a_dead_run_needs_one_press(lua, direct):
     """Nothing is lost clearing a run that already ended, so it does not ask."""
     H = load(lua, ui_script(direct))

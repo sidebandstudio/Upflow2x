@@ -496,6 +496,40 @@ function H.fire(id, event)
     if not ok then error(err) end
 end
 
+-- H.after_status_read, when set, runs once during the next click, right after
+-- the panel first reads its status file, or finds none: the run writing its
+-- status or exit code between the panel's reads. The panel still gets what
+-- it read, as a read that came first would.
+local function interleave()
+    local hook = H.after_status_read
+    if not hook then return function() end end
+    H.after_status_read = nil
+    local real_open = io.open
+    io.open = function(path, mode)
+        if not (hook and tostring(path):find("%.eternal2x_status%.json$")
+                and (mode or "r"):sub(1, 1) == "r") then
+            return real_open(path, mode)
+        end
+        local f = real_open(path, mode)
+        local body = f and f:read("*a")
+        if f then f:close() end
+        local run = hook
+        hook = nil
+        run()
+        if not f then return nil end
+        local left = body
+        return {
+            read = function(_self)
+                local out = left or ""
+                left = ""
+                return out
+            end,
+            close = function(_self) return true end,
+        }
+    end
+    return function() io.open = real_open end
+end
+
 function H.click(id)
     local handler = on(id).Clicked
     if not handler then error("no Clicked handler for " .. tostring(id)) end
@@ -503,7 +537,9 @@ function H.click(id)
     local real_print = print
     os.execute = H.make_execute(real_execute)
     print = function(...) end
+    local restore = interleave()
     local ok, err = pcall(handler, {})
+    restore()
     os.execute = real_execute
     print = real_print
     if not ok then error(err) end

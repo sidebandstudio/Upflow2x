@@ -782,11 +782,7 @@ end
 
 -- The status file is written by Stages/resolve_smooth.py as a flat JSON
 -- object with a fixed shape, so the panel reads it without a full parser.
-local function read_status()
-    local f = io.open(STATUS_PATH, "r")
-    if not f then return nil end
-    local s = f:read("*a") or ""
-    f:close()
+local function parse_status(s)
     if s == "" then return nil end
     return {
         stage    = json_string(s, "stage") or "",
@@ -803,6 +799,18 @@ local function read_status()
         done     = s:match('"done"%s*:%s*(%a+)') == "true",
         ok       = s:match('"ok"%s*:%s*(%a+)') == "true",
     }
+end
+
+local function read_status_at(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local s = f:read("*a") or ""
+    f:close()
+    return parse_status(s)
+end
+
+local function read_status()
+    return read_status_at(STATUS_PATH)
 end
 
 local function clear_status()
@@ -1770,6 +1778,21 @@ local function run_in_progress()
     return last and math.abs(os.time() - last) < STALLED_AFTER or false
 end
 
+-- One look at the run for a press of Stop or Reset: the exit code, then the
+-- status, each read once. Python writes its last status before it exits and
+-- the shell then writes the exit code, so a status read after the exit code
+-- is final. "finished" comes with that status, "live" is a run Stop can end,
+-- and "gone" is one that died or went quiet, or no run at all.
+local function look()
+    local exited = read_exit_code()
+    local st = read_status()
+    if st and st.done then return "finished", st end
+    if exited then return "gone" end
+    local last = (st and st.updated) or (RUNNING and LAUNCHED_AT)
+    if last and math.abs(os.time() - last) < STALLED_AFTER then return "live" end
+    return "gone"
+end
+
 -- ---------------------------------------------------------------------------
 -- polling
 -- ---------------------------------------------------------------------------
@@ -2005,18 +2028,45 @@ function win.On.RefreshStatusBtn.Clicked(ev)
     poll()
 end
 
-function win.On.CancelBtn.Clicked(ev)
-    -- A run can finish between the timer's looks. Its result comes first:
-    -- Stop or Reset then found no run going, cleared it as a dead one, and
-    -- the render never came in.
-    if RUNNING then
-        local st = read_status()
-        if st and st.done then
-            apply_status(st)
-            return
-        end
+local WAITING = "A render finished while the panel was closed. "
+    .. "Press Refresh Progress to add it to the timeline."
+
+-- A finished run met by Stop or Reset. This panel's run is handled as a poll
+-- would, importing its render once. A render that finished while the panel
+-- was closed waits for Refresh Progress, as the panel said when it opened.
+-- False when there is nothing worth keeping, such as an old failure.
+local function settle(st)
+    if RUNNING then return apply_status(st) end
+    if st.ok and st.import_path ~= "" then
+        set_status(WAITING)
+        return true
     end
-    if run_in_progress() then
+    return false
+end
+
+-- Reset's side of a run the look found gone. The run can still finish just
+-- after the look, so the status is moved aside in one step and read there,
+-- never deleted unread. A finished one goes back in place for the caller to
+-- handle, and a status written after the move is a new file Reset leaves.
+local function claim_status()
+    local aside = STATUS_PATH .. ".reset"
+    os.remove(aside)
+    if not os.rename(STATUS_PATH, aside) then return nil end
+    local st = read_status_at(aside)
+    if st and st.done then
+        os.rename(aside, STATUS_PATH)
+        return st
+    end
+    os.remove(aside)
+    return st
+end
+
+function win.On.CancelBtn.Clicked(ev)
+    -- One look decides, and nothing reads the run again to change its mind.
+    -- With two reads, a run that finished in between was taken for gone, and
+    -- its result was cleared before the import.
+    local state, st = look()
+    if state == "live" then
         stop_unasked()
         if not STOP_ASKED then
             local prompt = "Press Stop again to end the run. "
@@ -2032,7 +2082,9 @@ function win.On.CancelBtn.Clicked(ev)
             set_status(prompt)
             return
         end
-        -- The run sees this at its next frame, then reports Stopped.
+        -- The run sees this at its next frame, then reports Stopped. One
+        -- that finished since the look has nothing left to stop, and the
+        -- next poll handles its result.
         local f = io.open(STOP_PATH, "w")
         if f then f:close() end
         set_busy(true)
@@ -2040,7 +2092,14 @@ function win.On.CancelBtn.Clicked(ev)
         set_status(f and "Stopping..." or "Could not stop the run.")
         return
     end
-    clear_status()
+    if state == "gone" then st = claim_status() end
+    if st and st.done then
+        if settle(st) then return end
+        -- Nothing worth keeping, and a finished run writes nothing more.
+        os.remove(STATUS_PATH)
+    end
+    os.remove(EXIT_PATH)
+    os.remove(STOP_PATH)
     ANALYSING = false
     IMPORTED = false
     set_busy(false)
@@ -2161,8 +2220,7 @@ else
         -- the next run would delete its status unseen.
         LAST_OUTPUT = render_location(waiting)
         items.FolderBtn.Enabled = LAST_OUTPUT ~= nil
-        set_status("A render finished while the panel was closed. "
-            .. "Press Refresh Progress to add it to the timeline.")
+        set_status(WAITING)
     elseif AUTO_UPDATE then
         run_update(true)
     end
