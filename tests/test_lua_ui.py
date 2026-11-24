@@ -2892,7 +2892,7 @@ def test_a_pointer_that_cannot_be_written_still_names_the_run_before(lua, direct
     H = load(lua, ui_script(direct))
     a = give_up_on_a_quiet_render(H, direct)
     H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
-    break_writes(lua, "%.upflow2x_run[^%-/\\\\]*$")
+    break_writes(lua, "%.upflow2x_run%.new%-")
     launches = H.command_count()
     H.click("SmoothBtn")
     mend_writes(lua)
@@ -2934,7 +2934,7 @@ def test_a_pointer_that_cannot_be_moved_into_place_leaves_the_run_before_in_char
     H = load(lua, ui_script(direct))
     a = give_up_on_a_quiet_render(H, direct)
     H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
-    held = ["%.upflow2x_run%.new$"] + (["%.upflow2x_run%.old$"] if restore == "fails" else [])
+    held = ["%.upflow2x_run%.new%-"] + (["%.upflow2x_run%.old$"] if restore == "fails" else [])
     break_renames(lua, *held)
     launches = H.command_count()
     H.click("SmoothBtn")
@@ -2957,6 +2957,21 @@ def test_a_pointer_that_cannot_be_moved_into_place_leaves_the_run_before_in_char
     assert H.imported_at(1) == "/renders/shot_smooth.mp4"
     retry_renders_the_next_clip(H, direct, a, 1)
     assert run_tag(direct) not in ("", a) and not old.exists()
+
+
+def test_a_pointer_waiting_to_go_in_is_named_for_its_run(lua, direct):
+    """Two panels shared one waiting pointer, so one could move the other's
+    tag into place while that run was still starting, and that run could then
+    fail, leaving the pointer on a run that never started."""
+    staged = []
+    H = load(lua, ui_script(direct))
+    H.on_execute = lambda cmd: staged.extend(
+        (p.name, p.read_text()) for p in direct.glob(".upflow2x_run.new*"))
+    H.click("SmoothBtn")
+    H.on_execute = None
+    tag = run_tag(direct)
+    assert staged == [(f".upflow2x_run.new-{tag}", tag)]
+    assert not list(direct.glob(".upflow2x_run.new*"))
 
 
 def test_a_run_script_that_fails_as_it_closes_starts_nothing(lua, direct):

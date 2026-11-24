@@ -253,7 +253,7 @@ end
 -- A panel opened later reads it to find that run. Opening a file to write
 -- empties it, so a new pointer is written beside it and moved into place.
 local RUN_POINTER = join_path(RUN_DIR, ".upflow2x_run")
-local POINTER_NEW, POINTER_OLD = RUN_POINTER .. ".new", RUN_POINTER .. ".old"
+local POINTER_OLD = RUN_POINTER .. ".old"
 local RUN_TAG, STATUS_PATH, STOP_PATH, EXIT_PATH, RUN_SCRIPT, LOG_PATH
 
 local function use_run(tag)
@@ -1949,19 +1949,19 @@ end
 
 local RUNS_STARTED = 0
 
--- Moves the pointer written to POINTER_NEW into place. Windows moves a file
--- only onto a name not in use, so there the pointer steps aside as
+-- Moves the pointer written to `new` into place. Windows moves a file only
+-- onto a name not in use, so there the pointer steps aside as
 -- POINTER_OLD first, which a panel reads while no pointer is in place. The
 -- pointer in place is never deleted, so a move that fails partway leaves the
 -- last run found. False when the new pointer is not in place.
-local function commit_pointer()
-    local moved = os.rename(POINTER_NEW, RUN_POINTER)
+local function commit_pointer(new)
+    local moved = os.rename(new, RUN_POINTER)
     if not moved and exists(RUN_POINTER) then
         -- With the pointer in place, an old one is left from a move that
         -- finished.
         os.remove(POINTER_OLD)
         if os.rename(RUN_POINTER, POINTER_OLD) then
-            moved = os.rename(POINTER_NEW, RUN_POINTER)
+            moved = os.rename(new, RUN_POINTER)
             if not moved then os.rename(POINTER_OLD, RUN_POINTER) end
         end
     end
@@ -1987,12 +1987,15 @@ local function launch(ended, extra, marks)
                             ((tostring({}):gsub("%W", "")):sub(-6)))
     until not (exists(run_files(tag).status) or exists(run_files(tag).exit))
     local files = run_files(tag)
+    -- Named for the run, so another panel starting one at the same time
+    -- never puts its tag in this one's place.
+    local new = RUN_POINTER .. ".new-" .. tag
     -- A write can look fine and still fail as the file closes.
-    local f = io.open(POINTER_NEW, "w")
+    local f = io.open(new, "w")
     local wrote = f and f:write(tag)
     local closed = f and f:close()
     if not (wrote and closed) then
-        os.remove(POINTER_NEW)
+        os.remove(new)
         return false, CANNOT_START
     end
     if marks and #marks > 0 then
@@ -2000,7 +2003,7 @@ local function launch(ended, extra, marks)
         wrote = f and f:write(table.concat(marks, ","))
         closed = f and f:close()
         if not (wrote and closed) then
-            os.remove(POINTER_NEW)
+            os.remove(new)
             os.remove(files.marks)
             return false, "Could not write the marked frames to " .. files.marks .. "."
         end
@@ -2009,17 +2012,17 @@ local function launch(ended, extra, marks)
     use_run(tag)
     if not run_background("Stages.resolve_smooth", current_args(extra)) then
         use_run(last)
-        os.remove(POINTER_NEW)
+        os.remove(new)
         for _, path in pairs(files) do os.remove(path) end
         return false, CANNOT_START
     end
-    if not commit_pointer() then
+    if not commit_pointer(new) then
         -- Going, but a panel opened later could not find it, so it ends at
         -- its first frame and the last run stays the one the panel owns.
         f = io.open(files.stop, "w")
         if f then f:close() end
         use_run(last)
-        os.remove(POINTER_NEW)
+        os.remove(new)
         return false, CANNOT_START
     end
     if ended then
