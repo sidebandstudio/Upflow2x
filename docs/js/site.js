@@ -270,6 +270,17 @@
     });
 })();
 
+// A link to one troubleshooting answer opens it. Without script the link
+// still lands on its question.
+(function () {
+    function open() {
+        var target = location.hash && document.getElementById(location.hash.slice(1));
+        if (target && target.tagName === 'DETAILS') target.open = true;
+    }
+    open();
+    window.addEventListener('hashchange', open);
+})();
+
 // The film starts on a frame inside Resolve under one big play button, so
 // nobody mistakes it for a picture. Pressing it plays with sound.
 (function () {

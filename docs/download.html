@@ -8,18 +8,25 @@
     <link rel="canonical" href="https://upflow2x.com/download.html">
     <meta name="theme-color" content="#101013">
     <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Upflow2x">
     <meta property="og:url" content="https://upflow2x.com/download.html">
     <meta property="og:title" content="Download Upflow2x">
     <meta property="og:description" content="A free DaVinci Resolve Studio plugin that draws the in-betweens anime was never drawn with.">
-    <meta property="og:image" content="https://upflow2x.com/assets/og.jpg">
+    <meta property="og:image" content="https://upflow2x.com/assets/social-preview.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+    <meta property="og:image:alt" content="Upflow2x. Upscale and smooth anime in Resolve. Above, a bouncing ball as drawn on 2s, each drawing held for two frames. Below, the same bounce from Upflow2x, with an amber in-between drawn in place of each held frame.">
     <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="https://upflow2x.com/assets/social-preview.png">
+    <meta name="twitter:image:alt" content="Upflow2x. Upscale and smooth anime in Resolve. Above, a bouncing ball as drawn on 2s, each drawing held for two frames. Below, the same bounce from Upflow2x, with an amber in-between drawn in place of each held frame.">
     <link rel="icon" href="assets/icon.svg?v=20261027d" type="image/svg+xml">
     <link rel="icon" href="assets/favicon.png?v=20261027d" type="image/png" sizes="32x32">
     <link rel="apple-touch-icon" href="assets/apple-touch-icon.png?v=20261027d">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/site.css?v=20261115a">
+    <link rel="stylesheet" href="css/site.css?v=20261123a">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -78,6 +85,7 @@
                     Upflow2xInstaller-mac.zip
                 </a>
                 <p class="size">Extract the zip and open Upflow2xInstaller.app. The same app works on Apple Silicon and Intel. In-betweens run on the CPU, and Super Scale upscales.</p>
+                <p class="size">If setup v0.5.1 stops at Downloading Python with a certificate error, <a href="help.html#mac-certificate">start it from Terminal</a> instead.</p>
             </article>
         </div>
 
@@ -112,13 +120,16 @@
 
         <section class="section" id="older" aria-labelledby="older-title">
             <div class="section-head">
-                <h2 id="older-title">Older versions</h2>
+                <h2 id="older-title">Release history</h2>
             </div>
             <div class="older">
                 <table>
                     <thead><tr><th scope="col">Version</th><th scope="col">Released</th><th scope="col">Windows</th><th scope="col">macOS</th></tr></thead>
-                    <!-- Written in, so the list still shows when GitHub's API is rate
-                         limited. When the API answers, the script redraws it. -->
+                    <!-- Written in, so the list still shows without script or when
+                         GitHub's API is rate limited. A row goes in before its
+                         successor ships, so the page can't know whether it is the
+                         newest yet. The heading stays neutral until the script finds
+                         out, then reads Older versions. -->
                     <tbody id="older-rows">
                         <tr><td>0.5.1</td><td class="when">Nov 10, 2026</td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.1/upflow2x-win.zip">Windows zip</a></td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.1/upflow2x-mac.zip">macOS zip</a></td></tr>
                         <tr><td>0.5.0</td><td class="when">Oct 31, 2026</td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-win.zip">Windows zip</a></td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-mac.zip">macOS zip</a></td></tr>
@@ -186,6 +197,26 @@ function cell(row, url, label) {
     td.appendChild(a);
 }
 
+// True when version a, like 0.5.1, came out before version b.
+function before(a, b) {
+    var x = a.split('.'), y = b.split('.');
+    for (var i = 0; i < Math.max(x.length, y.length); i++) {
+        var step = (parseInt(x[i], 10) || 0) - (parseInt(y[i], 10) || 0);
+        if (step) return step < 0;
+    }
+    return false;
+}
+
+// With the newest version known, the list can say which ones are older, and
+// a row for the newest or anything after it leaves.
+function showOlder(latest) {
+    var rows = document.getElementById('older-rows');
+    Array.prototype.slice.call(rows.rows).forEach(function (row) {
+        if (!before(row.cells[0].textContent, latest)) rows.removeChild(row);
+    });
+    document.getElementById('older-title').textContent = 'Older versions';
+}
+
 fetch('https://api.github.com/repos/' + REPO + '/releases')
     .then(function (res) {
         // A rate-limited API answers with an error object, not a list.
@@ -223,6 +254,7 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
             cell(row, assetUrl(release, 'upflow2x-win.zip'), 'Windows zip');
             cell(row, assetUrl(release, 'upflow2x-mac.zip'), 'macOS zip');
         });
+        showOlder(version);
     })
     .catch(function () {
         // The API is down or rate limited. The buttons above still open the
@@ -239,6 +271,7 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
                     tag.textContent = 'v' + feed.version;
                     tag.classList.remove('pending');
                 });
+                showOlder(feed.version);
             })
             .catch(function () {});
     });

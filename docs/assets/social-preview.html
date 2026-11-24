@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<!--
+  The source of social-preview.png beside it, which is the og:image of every
+  page and the GitHub repo's social preview (Settings, General, Social
+  preview, uploaded by hand).
+
+  To redraw it, render this page at 1280x640 and save over the PNG. From this
+  folder, with Chrome:
+
+      chrome --headless=new --hide-scrollbars --force-device-scale-factor=1
+             --window-size=1280,640 --virtual-time-budget=3000
+             --screenshot=social-preview.png "file://$PWD/social-preview.html"
+
+  Chrome reads a bare file name as a web address, so the page goes in as a
+  file:// URL. On Windows that is file:/// and the folder's full path with
+  forward slashes. The PNG has to stay under 1 MB, which tests/test_site.py
+  checks.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="robots" content="noindex">
+<title>Upflow2x social preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@600&family=Geist+Mono:wght@500;600&display=block" rel="stylesheet">
+<style>
+:root {
+    --bg: #101013; --panel: #191a1e; --stage: #0a0a0d;
+    --text: #f4f4f1; --soft: #b9b9b6; --mute: #8f8f8c; --amber: #f2a93b;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { width: 1280px; height: 640px; overflow: hidden; }
+body {
+    position: relative;
+    background:
+        radial-gradient(620px 420px at 940px 330px, rgba(242, 169, 59, .10), transparent 70%),
+        var(--bg);
+    color: var(--text);
+    font-family: 'Geist', sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+
+.left { position: absolute; left: 80px; top: 80px; bottom: 80px; width: 560px;
+        display: flex; flex-direction: column; justify-content: space-between; }
+.brand { display: flex; align-items: center; gap: 16px; font-size: 40px; font-weight: 600; letter-spacing: -.015em; }
+.brand img { width: 64px; height: 64px; }
+.brand b { margin-left: 2px; padding: 7px 8px 6px; border-radius: 8px; font: 600 21px/1 'Geist Mono', monospace;
+           letter-spacing: .04em; color: var(--bg); background: var(--amber); position: relative; top: 2px; }
+h1 { font-size: 84px; line-height: 1.0; font-weight: 600; letter-spacing: -.035em; }
+h1 span { color: var(--amber); }
+.foot { font: 500 18px/1.5 'Geist Mono', monospace; letter-spacing: .07em; text-transform: uppercase; color: var(--mute); }
+.foot strong { color: var(--soft); font-weight: 500; }
+
+/* The same bounce drawn on 2s, then from Upflow2x. --h is the ball's height,
+   0 on the floor to 1 at the top of the frame. */
+.panel {
+    position: absolute; left: 688px; top: 80px; width: 512px; height: 480px;
+    padding: 30px 30px 0;
+    background: var(--panel);
+    border: 1.5px solid rgba(242, 169, 59, .38);
+    border-radius: 22px;
+    box-shadow: 0 0 0 6px rgba(242, 169, 59, .05), 0 40px 90px -40px rgba(242, 169, 59, .45);
+}
+.row + .row { margin-top: 34px; }
+.row-head { display: flex; justify-content: space-between; font: 600 16px/1 'Geist Mono', monospace;
+            letter-spacing: .09em; text-transform: uppercase; color: var(--mute); }
+.row-head .on { color: var(--amber); }
+.frames { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-top: 16px; }
+.frame { position: relative; height: 136px; border-radius: 10px; background: var(--stage);
+         border: 1.5px solid rgba(255, 255, 255, .12); }
+.frame::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 14px; height: 2px;
+                border-radius: 1px; background: rgba(255, 255, 255, .16); }
+.frame i { position: absolute; left: 50%; width: 26px; height: 26px; margin-left: -13px; border-radius: 50%;
+           background: var(--text); bottom: calc(17px + var(--h) * 84px); }
+.frame.held { background: #0e0e12; }
+.frame.held i { opacity: .38; }
+.frame.tween { border-color: rgba(242, 169, 59, .7); background: rgba(242, 169, 59, .08); }
+.frame.tween i { background: var(--amber); box-shadow: 0 0 18px rgba(242, 169, 59, .55); }
+.keys { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-top: 10px;
+        font: 600 17px/1 'Geist Mono', monospace; text-align: center; color: var(--mute); }
+.keys .on { color: var(--amber); }
+.keys .dim { opacity: .5; }
+</style>
+</head>
+<body>
+
+<div class="left">
+    <div class="brand">
+        <img src="icon.svg" alt="">
+        <span>Upflow</span><b>2X</b>
+    </div>
+    <h1>Upscale and smooth <span>anime in Resolve.</span></h1>
+    <p class="foot"><strong>Free</strong> for DaVinci Resolve Studio<br>Windows and macOS &middot; upflow2x.com</p>
+</div>
+
+<div class="panel">
+    <div class="row">
+        <p class="row-head"><span>As drawn</span><span>On 2s</span></p>
+        <div class="frames">
+            <div class="frame" style="--h:0"><i></i></div>
+            <div class="frame held" style="--h:0"><i></i></div>
+            <div class="frame" style="--h:.96"><i></i></div>
+            <div class="frame held" style="--h:.96"><i></i></div>
+            <div class="frame" style="--h:.64"><i></i></div>
+            <div class="frame held" style="--h:.64"><i></i></div>
+        </div>
+        <p class="keys"><span>A</span><span class="dim">A</span><span>B</span><span class="dim">B</span><span>C</span><span class="dim">C</span></p>
+    </div>
+    <div class="row">
+        <p class="row-head"><span class="on">Upflow2x</span><span>Every frame drawn</span></p>
+        <div class="frames">
+            <div class="frame" style="--h:0"><i></i></div>
+            <div class="frame tween" style="--h:.64"><i></i></div>
+            <div class="frame" style="--h:.96"><i></i></div>
+            <div class="frame tween" style="--h:.96"><i></i></div>
+            <div class="frame" style="--h:.64"><i></i></div>
+            <div class="frame tween" style="--h:0"><i></i></div>
+        </div>
+        <p class="keys"><span>A</span><span class="on">a</span><span>B</span><span class="on">b</span><span>C</span><span class="on">c</span></p>
+    </div>
+</div>
+
+</body>
+</html>

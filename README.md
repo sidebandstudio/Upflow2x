@@ -84,7 +84,11 @@ at the top of the panel shows them again.
    **More info**, then **Run anyway**. If macOS says it can't check the app,
    open System Settings → Privacy & Security and click **Open Anyway**.
 2. Click **Install** and wait for setup to finish. No separate Python download
-   or terminal commands are needed.
+   or terminal commands are needed. Setup v0.5.2 names each package under the
+   bar as it installs it. Setup v0.5.1 shows no progress at that step for a
+   minute or two, which is normal. If setup can't finish, it says why in red.
+   Fix that and press **Try Again**, a button setup v0.5.1 still labels
+   **Install**.
 3. Setup stores the plugin and its private Python in DaVinci Resolve's own
    folder, `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or
    `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. The
@@ -154,7 +158,9 @@ rendered from the drawings Upflow2x finds on its own.
 ![The Upflow2x panel open in DaVinci Resolve Studio, with Hero walk.mp4 on V1 and its render on V2.](https://upflow2x.com/assets/demo/resolve.jpg)
 
 The render runs in the background and the panel shows progress and the time
-left, so Resolve stays usable while it works. **Stop** ends it early. When it finishes, the rebuilt
+left, so Resolve stays usable while it works. **Stop** ends it early and
+deletes the frames drawn so far. From 0.5.2 it takes a second press within
+five seconds, during Analyse too. In 0.5.1 one press stops it. When it finishes, the rebuilt
 clip is imported and placed on the track above the original, starting on the
 same frame. With Interpolate on it runs three times as long, up to the last
 marker if the clip has any. It goes on the lowest
@@ -171,7 +177,9 @@ Then:
   through, and **Show Upflow2x** switches it back. Scrub or play to compare.
   It only works on an upscale with Interpolate off. A slowed render has no
   original to line up with.
-- **Show in Folder** opens the render's location.
+- **Show in Folder** opens the render's location. From 0.5.2, after a run
+  fails and leaves a log, the same button reads **Open Log** and opens that
+  log in Notepad on Windows or a text editor on a Mac.
 
 Renders go in an `Upflow2x` folder beside the project's cache folder, with a
 folder for each project. The cache folder is the Cache files location in
@@ -267,6 +275,7 @@ afterwards.
 
 | Problem | Fix |
 |---|---|
+| Mac setup stops at "Downloading Python" with `CERTIFICATE_VERIFY_FAILED` | Setup v0.5.1 reads web certificates from a folder that only python.org's Python 3.13 fills. Quit setup and start it from Terminal with the certificates every Mac has: `SSL_CERT_FILE=/etc/ssl/cert.pem ~/Downloads/Upflow2xInstaller.app/Contents/MacOS/Upflow2xInstaller`, changing the path if the app isn't in Downloads. Leave Terminal open until setup finishes. |
 | Resolve says you need Studio | Since 19.1 the free edition blocks script panels. Upflow2x needs Studio. |
 | Clicking Upflow2x does nothing, or "Plugin folder not configured" | The plugin folder moved or was deleted after installing, and Workspace → Console says `UI script not found`. Run the installer again. After a manual install, re-run `python Installer/install_upflow2x.py` from where the folder is now. |
 | "Could not reach Resolve" | Open the panel from Workspace → Scripts, not from a terminal. |
@@ -275,10 +284,10 @@ afterwards.
 | "Every frame differs, but the differences look like grain" | Mark the drawings with M, then press **Render**. From the command line, `--grain` raises the threshold above the grain. |
 | "...has a variable frame rate" | Render the clip to a constant frame rate first, from Resolve or with ffmpeg, as the message says. |
 | Rendering is slow | The time grows with the length of the clip on your timeline, and only the part it uses is rebuilt, so trimming helps. On a Radeon RX 7900 XT, under three seconds of 1080p, upscaled and slowed to 190 frames at 4K, takes about 33 seconds. Without a GPU the in-betweens are drawn on the CPU, about ten times slower, and Super Scale upscales. |
-| Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel says so and shows its last error. If a run was interrupted, press **Reset**. |
+| Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel says so and shows its last error. From 0.5.2, **Open Log** then opens the whole log. If a run was interrupted, press **Reset**. |
 | Resolve would not import the render | The render still finished. The panel prints where it is, so drag it into your media pool. Switching Output to `Image sequence` usually avoids this. |
 | Upscale skipped | Without a GPU the upscale is Super Scale, which needs Resolve Studio. |
-| Something else | Email the panel's status text and the `.upflow2x_last_run.log` file from the plugin folder. Setup puts it in `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in. |
+| Something else | Email the panel's status text and the `.upflow2x_last_run.log` file from the plugin folder. From 0.5.2, **Open Log** on the panel opens it after a failed run. Setup puts it in `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in. |
 
 ## Development
 
