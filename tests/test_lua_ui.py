@@ -1546,6 +1546,88 @@ def test_a_run_that_died_without_a_status_is_reported(lua, direct):
     assert H.enabled("SmoothBtn"), "the panel stayed busy after the run died"
 
 
+LOG_NAME = ".upflow2x_last_run.log"
+
+
+def die(H, root, log="Traceback (most recent call last):\nRuntimeError: boom\n"):
+    """A render whose Python exits without saying it is done."""
+    H.click("SmoothBtn")
+    (root / LOG_NAME).write_text(log)
+    (root / ".eternal2x_exit").write_text("1\n")
+    H.click("RefreshStatusBtn")
+
+
+def test_a_run_that_died_offers_its_log(lua, direct):
+    """The log sits in a hidden folder, and its path took two of the status
+    box's three lines, so nobody could find it to send it in."""
+    H = load(lua, ui_script(direct))
+    assert H.text_of("FolderBtn") == "Show in Folder" and not H.enabled("FolderBtn")
+    die(H, direct)
+    assert H.text_of("FolderBtn") == "Open Log" and H.enabled("FolderBtn")
+    assert H.status() == "Stopped without finishing: RuntimeError: boom Open Log shows the rest."
+    assert LOG_NAME in H.widgets["FolderBtn"].ToolTip
+    H.click("FolderBtn")
+    cmd = H.last_command().replace("\\", "/")
+    assert f"{direct.as_posix()}/{LOG_NAME}" in cmd
+    assert 'start "" notepad ' in cmd or "open -t " in cmd
+
+
+def test_the_log_opens_in_notepad_on_windows(lua, direct):
+    lua.execute('package.config = "\\\\" .. package.config:sub(2)')
+    H = load(lua, ui_script(direct))
+    die(H, direct)
+    H.click("FolderBtn")
+    script = (direct / ".eternal2x_reveal.cmd").read_bytes().decode("utf-8")
+    line = script.split("\r\n")[2]
+    assert line.startswith('start "" notepad "') and line.endswith(LOG_NAME + '"'), line
+
+
+def test_the_log_opens_in_a_text_editor_on_a_mac(lua, direct):
+    """Finder hides a file whose name starts with a dot, so open -R found nothing."""
+    lua.execute('package.config = "/" .. package.config:sub(2)')
+    H = load(lua, ui_script(direct))
+    die(H, direct)
+    H.click("FolderBtn")
+    assert H.last_command().startswith("open -t '")
+    assert "open -R" not in H.last_command()
+
+
+def test_a_run_that_failed_with_a_message_offers_its_log(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    (direct / LOG_NAME).write_text("Traceback (most recent call last):\nValueError: odd\n")
+    write_status(direct, done=True, ok=False, message="Upflow2x hit an unexpected error: odd")
+    H.click("RefreshStatusBtn")
+    assert H.text_of("FolderBtn") == "Open Log"
+    assert H.status() == "Upflow2x hit an unexpected error: odd"
+
+
+def test_a_stop_does_not_offer_the_log(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    (direct / LOG_NAME).write_text("Stopped.\n")
+    write_status(direct, done=True, ok=False, message="Stopped.")
+    H.click("RefreshStatusBtn")
+    assert H.text_of("FolderBtn") == "Show in Folder" and not H.enabled("FolderBtn")
+
+
+def test_an_empty_log_is_not_offered(lua, direct):
+    H = load(lua, ui_script(direct))
+    die(H, direct, log="")
+    assert H.text_of("FolderBtn") == "Show in Folder" and not H.enabled("FolderBtn")
+    assert H.status() == "Stopped without finishing: Python exited with code 1."
+
+
+def test_the_next_run_puts_show_in_folder_back(lua, direct):
+    H = load(lua, ui_script(direct))
+    die(H, direct)
+    finish_render(H, direct, import_path="/tmp/renders/out.mp4")
+    assert H.text_of("FolderBtn") == "Show in Folder"
+    H.click("FolderBtn")
+    assert "/tmp/renders/out.mp4" in H.last_command().replace("\\", "/")
+    assert "notepad" not in H.last_command() and "open -t" not in H.last_command()
+
+
 def test_a_run_still_going_is_not_reported_as_dead(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
@@ -1799,6 +1881,12 @@ def test_a_reopened_panel_follows_the_run_it_left_behind(lua, direct):
     assert H.enabled("SmoothBtn")
 
 
+def press_stop(H):
+    """Stop asks on its first press and ends the run on the second."""
+    H.click("CancelBtn")
+    H.click("CancelBtn")
+
+
 def test_reset_does_not_drop_a_run_that_is_still_reporting(lua, direct):
     """Reset is for a run that stopped. A live one would carry on underneath
     the next run, sharing its files."""
@@ -1806,7 +1894,7 @@ def test_reset_does_not_drop_a_run_that_is_still_reporting(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
     write_status(direct, fraction=0.4, updated=time.time())
-    H.click("CancelBtn")
+    press_stop(H)
     assert (direct / ".eternal2x_status.json").exists()
     assert not H.enabled("SmoothBtn")
     assert "Stopping" in H.status()
@@ -1817,7 +1905,7 @@ def test_reset_does_not_drop_a_run_that_has_not_reported_yet(lua, direct):
     launch a second run over the first."""
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
-    H.click("CancelBtn")
+    press_stop(H)
     assert not H.enabled("SmoothBtn")
     assert "Stopping" in H.status()
 
@@ -1839,7 +1927,7 @@ def test_the_panel_keeps_its_own_word_while_a_run_reports_progress(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
     write_status(direct, fraction=0.52, message="Starting", updated=time.time())
-    H.click("CancelBtn")
+    press_stop(H)
     H.click("RefreshStatusBtn")
     assert "Stopping" in H.status()
     assert "52%" in H.widgets["Progress"].Text
@@ -2101,7 +2189,7 @@ def test_stop_ends_a_run_that_is_going(lua, direct):
     H.click("SmoothBtn")
     assert H.text_of("CancelBtn") == "Stop"
     write_status(direct, fraction=0.3, updated=time.time())
-    H.click("CancelBtn")
+    press_stop(H)
     assert (direct / ".eternal2x_status.stop").exists()
     assert "Stopping" in H.status()
     write_status(direct, fraction=0.3, done=True, ok=False, message="Stopped.")
@@ -2116,6 +2204,92 @@ def test_a_stop_left_over_does_not_stop_the_next_run(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
     assert not (direct / ".eternal2x_status.stop").exists()
+
+
+def test_one_press_of_stop_only_asks(lua, direct):
+    """A stopped render deletes what it drew, and Stop sits beside Refresh
+    Progress, so a slip of the pointer ended a long render."""
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    plain = H.widgets["CancelBtn"].StyleSheet
+    write_status(direct, fraction=0.6, updated=time.time())
+    H.click("CancelBtn")
+    assert not (direct / ".eternal2x_status.stop").exists()
+    assert not H.enabled("SmoothBtn"), "the render was dropped"
+    assert H.status().startswith("Press Stop again to end the render.")
+    assert "deletes the frames" in H.status()
+    asking = H.widgets["CancelBtn"].StyleSheet
+    assert asking != plain and "color: #f2a93b; }" in asking.split("}")[0] + "}"
+    H.click("CancelBtn")
+    assert (direct / ".eternal2x_status.stop").exists()
+    assert H.widgets["CancelBtn"].StyleSheet == plain
+
+
+def test_an_unanswered_stop_goes_back_to_how_it_was(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    plain = H.widgets["CancelBtn"].StyleSheet
+    working = H.status()
+    H.click("CancelBtn")
+    advance_clock(lua, 6)
+    H.fire("PollTimer", "Timeout")
+    assert H.status() == working
+    assert H.widgets["CancelBtn"].StyleSheet == plain
+    # A press long after the first asks again rather than stopping.
+    H.click("CancelBtn")
+    assert not (direct / ".eternal2x_status.stop").exists()
+    assert H.status().startswith("Press Stop again")
+
+
+def test_a_second_press_too_late_asks_again_without_a_timer(lua, direct):
+    """Some Resolve builds have no timer, so nothing resets Stop between presses."""
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    H.click("CancelBtn")
+    advance_clock(lua, 6)
+    H.click("CancelBtn")
+    assert not (direct / ".eternal2x_status.stop").exists()
+    H.click("CancelBtn")
+    assert (direct / ".eternal2x_status.stop").exists()
+
+
+def test_stop_says_what_a_stopped_render_loses(lua, direct):
+    """Since 0.5.1 a stopped render is deleted. The tip still said its frames stay."""
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    tip = H.widgets["CancelBtn"].ToolTip
+    assert "deletes" in tip and "stay" not in tip
+
+
+def test_stopping_an_analysis_asks_without_warning_of_frames(lua, direct):
+    H = load(lua, ui_script(direct))
+    H.click("AnalyseBtn")
+    H.click("CancelBtn")
+    assert H.status() == "Press Stop again to end the analysis."
+
+
+def test_stop_on_a_run_from_an_earlier_panel_does_not_call_it_a_render(lua, direct):
+    """Reopened mid-run, the panel cannot tell an analysis from a render."""
+    import time
+    write_status(direct, stage="Analysing", fraction=0.4, updated=time.time())
+    H = load(lua, ui_script(direct))
+    H.click("CancelBtn")
+    assert H.status() == ("Press Stop again to end the run. "
+                          "Stopping a render deletes the frames it has drawn so far.")
+    assert not (direct / ".eternal2x_status.stop").exists()
+    H.click("CancelBtn")
+    assert (direct / ".eternal2x_status.stop").exists()
+
+
+def test_reset_of_a_dead_run_needs_one_press(lua, direct):
+    """Nothing is lost clearing a run that already ended, so it does not ask."""
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    (direct / ".eternal2x_exit").write_text("1\n")
+    H.click("CancelBtn")
+    assert H.status() == "Ready."
+    assert H.enabled("SmoothBtn")
 
 
 def test_a_render_that_finished_while_the_panel_was_closed_is_offered(lua, direct):

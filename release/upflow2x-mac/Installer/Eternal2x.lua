@@ -896,6 +896,11 @@ local LINK = themed([[
     QPushButton:hover { color: $amber; }
     QPushButton:disabled { color: $mute; }
 ]])
+-- Stop after one press, waiting for the second.
+local LINK_ASKING = themed([[
+    QPushButton { background-color: transparent; border: none; padding: 2px 4px;
+        min-height: 18px; font-size: 11px; color: $amber; }
+]])
 local WINDOW = themed([[
     QWidget { background-color: $panel; color: $text; font-size: 12px; }
     QComboBox {
@@ -1083,6 +1088,9 @@ local RUNNING = false
 local LAUNCHED_AT = nil
 local IMPORTED = false
 local ANALYSING = false
+-- "analysis" or "render", for the run this panel started. nil for one it
+-- picked up from an earlier panel, since nothing says which that is.
+local RUN_KIND = nil
 
 local function set_status(msg)
     items.Status.Text = msg or ""
@@ -1104,6 +1112,22 @@ local function set_progress(fraction, stage)
     items.Progress.Text = string.format("%d%%  %s", math.floor(fraction * 100 + 0.5), stage or "")
 end
 
+-- Stop takes two presses. A render stopped partway deletes the frames it has
+-- drawn, and Stop sits beside Refresh Progress. The second press counts for
+-- this many seconds after the first, and after that Stop asks again.
+local STOP_CONFIRM_FOR = 5
+local STOP_ASKED = nil
+
+-- A Stop pressed once and left goes back to plain Stop, and the status back
+-- to what it said before, unless something else has been said since.
+local function stop_unasked(now)
+    local asked = STOP_ASKED
+    if not asked or (not now and math.abs(os.time() - asked.at) <= STOP_CONFIRM_FOR) then return end
+    STOP_ASKED = nil
+    items.CancelBtn.StyleSheet = LINK
+    if items.Status.Text == asked.prompt then set_status(asked.status) end
+end
+
 local function set_busy(busy)
     RUNNING = busy
     items.SmoothBtn.Enabled = not busy
@@ -1111,8 +1135,25 @@ local function set_busy(busy)
     items.UpdateBtn.Enabled = not busy
     items.SmoothBtn.Text = busy and "Working..." or RENDER_LABEL
     items.CancelBtn.Text = busy and "Stop" or "Reset"
-    items.CancelBtn.ToolTip = busy and "End the run now. Frames it has written stay in its folder."
+    items.CancelBtn.ToolTip = busy
+        and "End the run. Press twice, since a render stopped partway deletes the frames it has drawn."
         or "Clear a run that stopped without finishing."
+    STOP_ASKED = nil
+    items.CancelBtn.StyleSheet = LINK
+end
+
+-- After a run fails, Show in Folder becomes Open Log. The log says why it
+-- failed, and it sits in a hidden folder nobody would find to send it in.
+local SHOW_LOG = false
+
+local function offer_log(on)
+    -- Only a log with something in it, or it opens an empty page.
+    SHOW_LOG = on and last_log_line() ~= nil
+    items.FolderBtn.Text = SHOW_LOG and "Open Log" or "Show in Folder"
+    items.FolderBtn.ToolTip = SHOW_LOG
+        and ("Open the log of the run that failed, to read it or send it in.\n" .. LOG_PATH)
+        or "Open the folder the render was saved to."
+    items.FolderBtn.Enabled = SHOW_LOG or LAST_OUTPUT ~= nil
 end
 
 -- Seconds as text that Python's float() reads, whatever the locale.
@@ -1601,6 +1642,8 @@ local function apply_status(st)
                 or "Failed. See the console for details."
             if ANALYSING then items.AnalysisLabel.Text = why end
             ANALYSING = false
+            -- A Stop is what the editor asked for, with nothing to look into.
+            offer_log(st.message ~= "Stopped.")
             set_status(why)
             return true
         end
@@ -1637,7 +1680,7 @@ local function apply_status(st)
         if st.import_path ~= "" and not IMPORTED then
             IMPORTED = true
             LAST_OUTPUT = render_location(st)
-            items.FolderBtn.Enabled = LAST_OUTPUT ~= nil
+            offer_log(false)
             local ok, notes, where, hint = import_result(st)
             -- A slowed render runs past its original, so off it shows the next shot.
             items.CompareBtn.Enabled = LAST_ITEM ~= nil and st.slow_motion == 1
@@ -1669,6 +1712,7 @@ end
 local STALLED_AFTER = 180
 
 local function poll()
+    stop_unasked()
     local exited = read_exit_code()
     local st = read_status()
     if apply_status(st) then return true end
@@ -1678,6 +1722,7 @@ local function poll()
         local last = (st and st.updated and st.updated > 0) and st.updated or LAUNCHED_AT
         local quiet = last and (os.time() - last) or 0
         -- Quiet this long, the button clears the run, so it says Reset.
+        if quiet > STALLED_AFTER then stop_unasked(true) end
         if quiet > STALLED_AFTER and not st then
             items.CancelBtn.Text = "Reset"
             set_status(string.format("Python has not started after %d minutes. Press Reset "
@@ -1698,9 +1743,13 @@ local function poll()
     -- Python exited without saying it was done: it could not start, could not
     -- load a package, or crashed. Its last words are the end of the log.
     local why = last_log_line() or ("Python exited with code " .. exited .. ".")
-    local msg = "Stopped without finishing: " .. why .. " Full log: " .. LOG_PATH
     set_busy(false)
     set_progress(0, nil)
+    -- The status box fits three lines, and the log's path took two of them.
+    offer_log(true)
+    print("[Upflow2x] Full log: " .. LOG_PATH)
+    local msg = "Stopped without finishing: " .. why
+        .. (SHOW_LOG and " Open Log shows the rest." or "")
     if ANALYSING then items.AnalysisLabel.Text = msg end
     ANALYSING = false
     set_status(msg)
@@ -1822,7 +1871,9 @@ function win.On.AnalyseBtn.Clicked(ev)
     -- Backgrounded like the render: analysis is quick on a short clip but can
     -- take tens of seconds on a long one, and Resolve must not freeze for it.
     clear_status()
+    offer_log(false)
     ANALYSING = true
+    RUN_KIND = "analysis"
     ANALYSED_ITEM = SOURCE_ITEM
     IMPORTED = false
     STAGE.name = nil
@@ -1862,10 +1913,12 @@ function win.On.SmoothBtn.Clicked(ev)
         end
     end
     clear_status()
+    offer_log(false)
     IMPORTED = false
     ANALYSING = false
     STAGE.name = nil
     RUN_PLACE = SOURCE_PLACE
+    RUN_KIND = "render"
     LAST_ITEM = nil
     items.CompareBtn.Enabled = false
     set_busy(true)
@@ -1896,8 +1949,11 @@ function win.On.CompareBtn.Clicked(ev)
     set_status(showing and "Showing the Upflow2x version." or "Showing the original.")
 end
 
+-- After a failed run it opens the log in a text editor instead. Finder hides
+-- a file whose name starts with a dot, so showing it there would find nothing.
 function win.On.FolderBtn.Clicked(ev)
-    if not LAST_OUTPUT then return end
+    local target = SHOW_LOG and LOG_PATH or LAST_OUTPUT
+    if not target then return end
     local cmd
     if is_windows() then
         if launch_problem() then
@@ -1908,19 +1964,24 @@ function win.On.FolderBtn.Clicked(ev)
         -- reports 1 even when it worked, so its answer is not checked. cmd
         -- expands %NAME% in a command line, so the path goes in a script,
         -- where doubling % keeps it literal, started as the render is.
+        -- Notepad goes through start, so the script ends without waiting on it.
         local f = io.open(REVEAL_SCRIPT, "wb")
         if not f then return end
-        local target = shell_quote((LAST_OUTPUT:gsub("/", "\\")))
-        f:write("@echo off\r\nchcp 65001 >nul\r\nexplorer /select,",
-                (target:gsub("%%", "%%%%")), "\r\n")
+        local quoted = shell_quote((target:gsub("/", "\\")))
+        f:write("@echo off\r\nchcp 65001 >nul\r\n",
+                SHOW_LOG and "start \"\" notepad " or "explorer /select,",
+                (quoted:gsub("%%", "%%%%")), "\r\n")
         f:close()
         local dir = (REPO_ROOT ~= "" and REPO_ROOT or root):gsub("/", "\\")
         cmd = "start \"Upflow2x\" /D " .. shell_quote(dir) .. " /MIN cmd /c .\\"
             .. basename(REVEAL_SCRIPT)
+    elseif SHOW_LOG then
+        local q = shell_quote(target)
+        cmd = "open -t " .. q .. " 2>/dev/null || xdg-open " .. q .. " >/dev/null 2>&1 &"
     else
-        local q = shell_quote(LAST_OUTPUT)
+        local q = shell_quote(target)
         cmd = "open -R " .. q .. " 2>/dev/null || xdg-open " ..
-              shell_quote(LAST_OUTPUT:match("^(.+)/") or ".") .. " >/dev/null 2>&1 &"
+              shell_quote(target:match("^(.+)/") or ".") .. " >/dev/null 2>&1 &"
     end
     print("[Upflow2x] " .. cmd)
     if is_windows() then
@@ -1946,6 +2007,21 @@ end
 
 function win.On.CancelBtn.Clicked(ev)
     if run_in_progress() then
+        stop_unasked()
+        if not STOP_ASKED then
+            local prompt = "Press Stop again to end the run. "
+                .. "Stopping a render deletes the frames it has drawn so far."
+            if RUN_KIND == "analysis" then
+                prompt = "Press Stop again to end the analysis."
+            elseif RUN_KIND == "render" then
+                prompt = "Press Stop again to end the render. "
+                    .. "Stopping deletes the frames it has drawn so far."
+            end
+            STOP_ASKED = { at = os.time(), prompt = prompt, status = items.Status.Text }
+            items.CancelBtn.StyleSheet = LINK_ASKING
+            set_status(prompt)
+            return
+        end
         -- The run sees this at its next frame, then reports Stopped.
         local f = io.open(STOP_PATH, "w")
         if f then f:close() end
