@@ -10,9 +10,11 @@ That works on both Windows (official embeddable package) and macOS
 
 from __future__ import annotations
 
+import collections
 import io
 import os
 import platform
+import re
 import shutil
 import ssl
 import subprocess
@@ -23,7 +25,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 # The config format lives with the command-line installer so the two cannot
 # drift. This runs standalone and from a PyInstaller bundle, where the repo
@@ -237,6 +239,27 @@ def _download_with_progress(url: str, callback=None) -> bytes:
     return data.getvalue()
 
 
+# How long pip may take over the packages before setup gives up on it.
+PIP_TIMEOUT = 600
+
+
+def _pip_step(line: str) -> str | None:
+    """What a line of pip's output says it is doing, short enough for the
+    label under the bar. None for the lines in between."""
+    text = line.strip()
+    words = text.split()
+    if len(words) > 1 and words[0] == "Collecting":
+        return f"Getting {re.split(r'[<>=!~;\[(]', words[1])[0]}..."
+    if len(words) > 1 and words[0] == "Downloading":
+        # A wheel's file name, or its whole URL in older pips, then its size.
+        name = words[1].rsplit("/", 1)[-1].split("-")[0]
+        size = text[text.rindex("("):] if text.endswith(")") else ""
+        return f"Downloading {name} {size}".rstrip() + "..."
+    if text.startswith("Installing collected packages:"):
+        return f"Installing {text.split(':', 1)[1].strip()}..."
+    return None
+
+
 def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
     """Unpack a downloaded archive so no member can land outside dest.
 
@@ -293,6 +316,7 @@ class InstallerApp:
         self.installing = False
         self.install_done = False
         self.python_path: str | None = None
+        self._pip: subprocess.Popen | None = None
 
         self._build_ui()
 
@@ -386,9 +410,19 @@ class InstallerApp:
             bg=BTN_BG, fg=FG, activebackground="#1e1e28",
             activeforeground=FG, borderwidth=0, relief="flat",
             padx=26, pady=10, cursor="hand2",
-            command=self.root.destroy,
+            command=self._close,
         )
         self.close_btn.pack(side="left", padx=8)
+
+        # Enter presses the button that has focus, Install to begin with, so
+        # it never installs with Close focused. invoke does nothing on a
+        # disabled button, as Install is while it runs and once it's done.
+        # Escape and the window's own close button go through Close's check.
+        for button in (self.install_btn, self.close_btn):
+            button.bind("<Return>", lambda event, button=button: button.invoke())
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.bind("<Escape>", lambda event: self._close())
+        self.install_btn.focus_set()
 
         self._log("Upflow2x needs:", "accent")
         for line in REQUIREMENTS:
@@ -417,9 +451,21 @@ class InstallerApp:
         self.log_text.configure(state="disabled")
 
     def _set_progress(self, value: float, label: str = ""):
+        if str(self.progress.cget("mode")) == "indeterminate":
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
         self.progress["value"] = value
         self.progress_label.configure(text=label)
         self.root.update_idletasks()
+
+    def _pulse(self, label: str):
+        """For a step with no measure of how far it has got, such as pip. The
+        bar keeps moving, so setup doesn't look stuck, and the label says what
+        it is on. The next _set_progress stops it."""
+        if str(self.progress.cget("mode")) != "indeterminate":
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(15)
+        self.progress_label.configure(text=label)
 
     # ---- Install thread management ----------------------------------------
 
@@ -427,7 +473,7 @@ class InstallerApp:
         if self.installing or self.install_done:
             return
         self.installing = True
-        self.install_btn.configure(state="disabled", bg="#555555")
+        self.install_btn.configure(state="disabled", bg="#555555", text="Installing...")
         threading.Thread(target=self._run_install, daemon=True).start()
 
     def _run_install(self):
@@ -441,7 +487,27 @@ class InstallerApp:
     def _on_finish(self):
         self.installing = False
         if not self.install_done:
-            self.install_btn.configure(state="normal", bg=ACCENT)
+            # Each step logs what went wrong. Without this the label stayed on
+            # the step that failed, as if it were still running.
+            self._set_progress(0, "Setup did not finish.")
+            self._log("\nSetup did not finish. Sort out the problem in red above, "
+                      "then press Try Again.", "err")
+            self.install_btn.configure(state="normal", bg=ACCENT, text="Try Again")
+
+    def _close(self):
+        """Close the window, asking first while setup runs. Quitting partway
+        can leave an update half copied over the version Resolve loads."""
+        if self.installing and not messagebox.askyesno(
+                "Quit setup?",
+                "Setup is still running. If you quit now, Upflow2x may not open in "
+                "Resolve until you run setup again.\n\nQuit anyway?",
+                icon="warning", default="no", parent=self.root):
+            return
+        # pip has no window, so left running it would go on installing unseen.
+        pip = self._pip
+        if pip is not None:
+            pip.kill()
+        self.root.destroy()
 
     # ---- Embedded Python: Windows -----------------------------------------
 
@@ -482,7 +548,7 @@ class InstallerApp:
             return None
 
         self.root.after(0, self._log, "  Installing pip...", "dim")
-        self.root.after(0, self._set_progress, 28, "Installing pip...")
+        self.root.after(0, self._pulse, "Installing pip...")
 
         try:
             pip_data = _download_with_progress(GET_PIP_URL)
@@ -597,25 +663,54 @@ class InstallerApp:
 
     def _install_packages(self, python_path: str) -> bool:
         req_file = self.source_root / "requirements.txt"
-        if req_file.exists():
-            pip_cmd = [python_path, "-m", "pip", "install",
-                       "-r", str(req_file), "--no-warn-script-location", "--quiet"]
-        else:
-            pip_cmd = [python_path, "-m", "pip", "install",
-                       "numpy", "opencv-python", "--no-warn-script-location", "--quiet"]
-
+        packages = ["-r", str(req_file)] if req_file.exists() else ["numpy", "opencv-python"]
+        # Not quiet, so the label follows pip from package to package. A
+        # minute or two at one spot on the bar looked like setup had hung.
+        pip_cmd = [python_path, "-m", "pip", "install", *packages,
+                   "--no-warn-script-location", "--progress-bar", "off"]
+        self.root.after(0, self._pulse, "Installing packages...")
         try:
-            result = subprocess.run(pip_cmd, capture_output=True, text=True, timeout=600,
-                                    **_NO_WINDOW)
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-                self.root.after(0, self._log, f"  Failed: {stderr[:200]}", "err")
-                return False
-        except subprocess.TimeoutExpired:
+            # Unbuffered, or pip's lines would arrive in blocks.
+            proc = subprocess.Popen(pip_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, errors="replace",
+                                    env={**os.environ, "PYTHONUNBUFFERED": "1"}, **_NO_WINDOW)
+        except OSError:
+            self.root.after(0, self._log, "  Could not run pip.", "err")
+            return False
+        self._pip = proc
+
+        timed_out = threading.Event()
+
+        def give_up():
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(PIP_TIMEOUT, give_up)
+        # A daemon, so it never keeps setup running after its window closes.
+        timer.daemon = True
+        timer.start()
+        tail = collections.deque(maxlen=50)
+        try:
+            for line in proc.stdout:
+                tail.append(line.rstrip())
+                step = _pip_step(line)
+                if step:
+                    self.root.after(0, self._pulse, step)
+            proc.wait()
+        finally:
+            timer.cancel()
+            self._pip = None
+        if timed_out.is_set():
             self.root.after(0, self._log, "  Timed out after 10 minutes.", "err")
             return False
-        except FileNotFoundError:
-            self.root.after(0, self._log, "  Could not run pip.", "err")
+        if proc.returncode != 0:
+            # pip's ERROR lines come last and say what went wrong. The first
+            # 200 characters, shown before, could stop at a retry warning.
+            lines = [line for line in tail if line.strip()]
+            errors = [line for line in lines if line.startswith("ERROR:")] or lines[-3:]
+            self.root.after(0, self._log, "  pip could not install the packages:", "err")
+            for line in errors[-3:]:
+                self.root.after(0, self._log, f"    {line.strip()[:300]}", "err")
             return False
         return True
 
