@@ -891,53 +891,73 @@ local function themed(sheet)
 end
 
 -- Resolve's UI Manager ignores #name selectors in a window's style sheet, so
--- every widget that looks different from the rest carries its own.
+-- every widget that looks different from the rest carries its own. Text the
+-- panel needs read is $text or $soft, at least 4.5:1 on the panel's grey.
+-- $mute is for what is switched off. Amber fills only Render, and marks a
+-- switch that is on and a Stop waiting for its second press.
+-- A focused control gets a light border, or an underline for a link, for
+-- whoever moves through the panel with Tab.
 local TITLE = themed("QLabel { font-size: 17px; font-weight: 600; color: $text; }")
 local BADGE = themed([[QLabel { background-color: $amber; color: $on_amber; border-radius: 4px;
     padding: 1px 5px; font-family: Consolas, Menlo, monospace; font-size: 10px; font-weight: 700; }]])
-local VERSION = themed("QLabel { color: $mute; font-size: 11px; }")
-local HAIRLINE = themed("QLabel { background-color: $hair; }")
+local VERSION = themed("QLabel { color: $soft; font-size: 11px; }")
+-- A group's name, and on its right what to know about it, over one hairline,
+-- as the Inspector heads its groups.
+local SECTION = themed([[QLabel { color: $text; font-size: 11px; font-weight: 700;
+    padding: 0px 0px 3px 0px; border-bottom: 1px solid $line; }]])
+local SECTION_NOTE = themed([[QLabel { color: $soft; font-size: 11px;
+    padding: 0px 0px 3px 0px; border-bottom: 1px solid $line; }]])
 local INFO = themed([[QLabel { color: $soft; border: 1px solid $line; border-radius: 8px;
     font-family: Georgia, serif; font-size: 10px; font-weight: 700; }]])
 local CARD = themed([[QLabel { background-color: $field; border: 1px solid $hair;
     border-radius: 6px; padding: 7px 10px; color: $text; font-size: 12px; }]])
 local NOTE = themed("QLabel { color: $soft; font-size: 11px; }")
+-- What a switch does to the render, under it.
+local MODE = themed("QLabel { color: $soft; font-size: 11px; padding: 0px 2px; }")
+local STATUS = themed("QLabel { color: $text; font-size: 11px; }")
 local FIELD_LABEL = themed("QLabel { color: $soft; font-size: 12px; }")
-local META = themed("QLabel { color: $mute; font-size: 10px; }")
+local META = themed("QLabel { color: $soft; font-size: 11px; }")
 local PROGRESS = themed("QLabel { color: $soft; font-size: 11px; font-family: Consolas, Menlo, monospace; }")
 local START = themed([[
     QPushButton { background-color: $amber; border: none; border-radius: 8px;
         color: $on_amber; font-size: 15px; font-weight: 700; }
     QPushButton:hover { background-color: $amber_hover; }
     QPushButton:pressed { background-color: $amber_down; }
-    QPushButton:disabled { background-color: $raise; color: $mute; }
+    QPushButton:focus { border: 2px solid $text; }
+    QPushButton:disabled { background-color: $raise; color: $mute; border: none; }
 ]])
--- On or off at a glance: the whole tile lights up when it is on. They are
--- checkable buttons, since a checkbox only takes a click on its dot and words.
+-- The whole tile is the switch, since a checkbox only takes a click on its
+-- dot and words. On, its name turns bold and its border amber, and the line
+-- under it starts with On, so the state never rests on colour alone.
 local TOGGLE = themed([[
     QPushButton { background-color: $raise; border: 1px solid $line; border-radius: 8px;
         padding: 0px 12px; min-height: 34px; font-size: 13px; color: $soft; }
     QPushButton:hover { background-color: $hover; }
-    QPushButton:checked { border-color: $amber; color: $text; background-color: rgba(242, 169, 59, 40); }
-    QPushButton:checked:hover { background-color: rgba(242, 169, 59, 64); }
+    QPushButton:checked { border-color: $amber; color: $text; font-weight: 700;
+        background-color: rgba(242, 169, 59, 28); }
+    QPushButton:checked:hover { background-color: rgba(242, 169, 59, 48); }
+    QPushButton:focus { border-color: $text; }
 ]])
 local BUTTON = themed([[
     QPushButton { background-color: $raise; border: 1px solid $line; border-radius: 6px;
-        min-height: 30px; padding: 3px 10px; font-size: 12px; color: $text; }
+        min-height: 24px; padding: 3px 12px; font-size: 12px; color: $text; }
     QPushButton:hover { background-color: $hover; }
     QPushButton:pressed { background-color: $field; }
+    QPushButton:focus { border-color: $text; }
     QPushButton:disabled { background-color: $panel; border-color: $hair; color: $mute; }
 ]])
 local LINK = themed([[
     QPushButton { background-color: transparent; border: none; padding: 2px 4px;
         min-height: 18px; font-size: 11px; color: $soft; }
     QPushButton:hover { color: $amber; }
+    QPushButton:focus { color: $text; text-decoration: underline; }
     QPushButton:disabled { color: $mute; }
 ]])
 -- Stop after one press, waiting for the second.
 local LINK_ASKING = themed([[
     QPushButton { background-color: transparent; border: none; padding: 2px 4px;
-        min-height: 18px; font-size: 11px; color: $amber; }
+        min-height: 18px; font-size: 11px; color: $amber; font-weight: 700; }
+    QPushButton:focus { text-decoration: underline; }
 ]])
 local WINDOW = themed([[
     QWidget { background-color: $panel; color: $text; font-size: 12px; }
@@ -946,16 +966,21 @@ local WINDOW = themed([[
         padding: 4px 8px; min-height: 18px; color: $text;
     }
     QComboBox:hover { border-color: $line; }
+    QComboBox:focus { border-color: $text; }
     QComboBox QAbstractItemView {
         background-color: $field; border: 1px solid $line; outline: none;
-        selection-background-color: $amber; selection-color: $on_amber;
+        selection-background-color: $hover; selection-color: $text;
     }
     QSlider::groove:horizontal { height: 3px; border-radius: 1px; background-color: $field; }
-    QSlider::sub-page:horizontal { border-radius: 1px; background-color: $amber; }
+    QSlider::sub-page:horizontal { border-radius: 1px; background-color: $soft; }
     QSlider::handle:horizontal {
         width: 12px; height: 12px; margin: -5px 0; border-radius: 6px; background-color: $text;
     }
     QSlider::handle:horizontal:hover { background-color: #ffffff; }
+    QSlider::handle:horizontal:focus {
+        width: 10px; height: 10px; margin: -6px 0; border-radius: 7px;
+        border: 2px solid $soft; background-color: #ffffff;
+    }
     QToolTip { background-color: $field; color: $text; border: 1px solid $line; padding: 5px; }
 ]])
 -- A thin bar, amber up to how far the run has got. Empty, it keeps its
@@ -1011,16 +1036,35 @@ local function row(name, control, tip)
     }
 end
 
--- Top to bottom in the order you use it: the clip, Analyse and its
--- threshold, the two switches and the output, then Render. All in one
+-- A group's heading: its name, and on the right a word on how it is used.
+local function heading(id, name, note)
+    return ui:HGroup{ Weight = 0, Spacing = 0,
+        ui:Label{ ID = id, Text = name, StyleSheet = SECTION, Weight = 1,
+                  Alignment = { AlignLeft = true, AlignBottom = true } },
+        ui:Label{ ID = id .. "Note", Text = note or "", StyleSheet = SECTION_NOTE, Weight = 0,
+                  Alignment = { AlignRight = true, AlignBottom = true } },
+    }
+end
+
+-- Under a switch, what it does to the render, in words show_modes writes.
+-- Two lines, for a narrow window or a larger font.
+local function mode_line(id, tip)
+    return ui:Label{ ID = id, Text = "", StyleSheet = MODE, WordWrap = true, ToolTip = tip,
+                     Weight = 0, MinimumSize = { 0, 28 },
+                     Alignment = { AlignHCenter = true, AlignTop = true } }
+end
+
+-- The groups top to bottom in the order you use them: the clip, how its
+-- drawings are found, how it renders, then Render and how the run goes.
+-- Rows sit closer inside a group than the groups do to each other. All in one
 -- window, so nothing opens on top of it.
 local win = disp:AddWindow({
     ID = "Eternal2x",
     WindowTitle = "Upflow2x  v" .. CURRENT_VERSION,
-    Geometry = { 100, 100, 380, 506 },
+    Geometry = { 100, 100, 380, 620 },
     StyleSheet = WINDOW,
 }, ui:VGroup{
-    Spacing = 8,
+    Spacing = 10,
 
     ui:HGroup{ Weight = 0, Spacing = 6,
         ui:Label{ ID = "Title", Text = "Upflow", StyleSheet = TITLE, Weight = 0 },
@@ -1033,52 +1077,78 @@ local win = disp:AddWindow({
         info(TIPS.needs, "NeedsInfo"),
     },
 
-    ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = CARD,
-              WordWrap = true, MinimumSize = { 0, 46 }, ToolTip = TIPS.clip },
-
-    ui:Button{ ID = "AnalyseBtn", Text = "Analyse", StyleSheet = BUTTON, ToolTip = TIPS.detection },
-    row("Threshold", ui:HGroup{ Weight = 0.8, Spacing = 8,
-        ui:Slider{ ID = "ThresholdSlider", Weight = 1, Minimum = 1, Maximum = 9, PageStep = 1,
-                   Value = THRESHOLD, Orientation = "Horizontal" },
-        ui:Label{ ID = "ThresholdValue", Text = tostring(THRESHOLD), StyleSheet = FIELD_LABEL,
-                  Weight = 0, MinimumSize = { 10, 0 },
-                  Alignment = { AlignRight = true, AlignVCenter = true } },
-    }, TIPS.threshold),
-    ui:Label{ ID = "AnalysisLabel", Text = ANALYSIS_HINT, StyleSheet = NOTE, WordWrap = true },
-
-    ui:Label{ StyleSheet = HAIRLINE, MinimumSize = { 0, 1 }, MaximumSize = { 16777215, 1 } },
-
-    ui:HGroup{ Weight = 0, Spacing = 8,
-        ui:Button{ ID = "UpscaleCB", Text = "Upscaling", Checkable = true, Checked = DO_UPSCALE,
-                   StyleSheet = TOGGLE, ToolTip = TIPS.upscale },
-        ui:Button{ ID = "InterpCB", Text = "Interpolate", Checkable = true,
-                   Checked = DO_INTERPOLATE, StyleSheet = TOGGLE, ToolTip = TIPS.interp },
+    ui:VGroup{ Weight = 0, Spacing = 6,
+        heading("ClipHeading", "Clip", "At the playhead"),
+        ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = CARD,
+                  WordWrap = true, MinimumSize = { 0, 46 }, ToolTip = TIPS.clip, Weight = 0 },
     },
-    row("Output", ui:ComboBox{ ID = "FormatCombo", Weight = 0.8 }, TIPS.format),
-    row("Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.8 }, TIPS.folder),
-    ui:Button{ ID = "SmoothBtn", Text = RENDER_LABEL, StyleSheet = START, ToolTip = TIPS.render,
-               MinimumSize = { 0, 44 }, MaximumSize = { 16777215, 44 } },
 
-    ui:Label{ ID = "ProgressBar", Text = "", StyleSheet = bar_style(nil),
-              MinimumSize = { 0, 4 }, MaximumSize = { 16777215, 4 } },
-    ui:Label{ ID = "Progress", Text = "", StyleSheet = PROGRESS, WordWrap = true },
-    -- Three lines, as long as a finished render's message runs. Resolve does
-    -- not grow a wrapped label to fit, so two lines cut it off top and bottom.
-    ui:Label{ ID = "Status", Text = "Ready.", StyleSheet = NOTE, WordWrap = true,
-              MinimumSize = { 0, 46 } },
-
-    ui:HGroup{ Weight = 0, Spacing = 2,
-        ui:Button{ ID = "CompareBtn", Text = "Show Original", StyleSheet = LINK, Enabled = false, Weight = 0,
-                   ToolTip = "Switch the render off and on to compare it with the original under it." },
-        ui:Button{ ID = "FolderBtn", Text = "Show in Folder", StyleSheet = LINK, Enabled = false, Weight = 0,
-                   ToolTip = "Open the folder the render was saved to." },
-        ui:HGap(0, 1),
-        ui:Button{ ID = "RefreshStatusBtn", Text = "Refresh Progress", StyleSheet = LINK, Weight = 0,
-                   ToolTip = "Read how far the run has got, if the panel stopped updating." },
-        ui:Button{ ID = "CancelBtn", Text = "Reset", StyleSheet = LINK, Weight = 0,
-                   ToolTip = "Clear a run that stopped without finishing." },
+    -- Analyse and the threshold it uses share a row. Render finds the
+    -- drawings itself on a clip with no markers, so this group is optional.
+    ui:VGroup{ Weight = 0, Spacing = 6,
+        heading("DrawingsHeading", "Drawings", "Optional"),
+        ui:HGroup{ Weight = 0, Spacing = 8,
+            ui:Button{ ID = "AnalyseBtn", Text = "Analyse", StyleSheet = BUTTON, ToolTip = TIPS.detection,
+                       Weight = 0, MinimumSize = { 84, 0 } },
+            ui:Label{ Text = "Threshold", StyleSheet = FIELD_LABEL, Weight = 0, ToolTip = TIPS.threshold,
+                      Alignment = { AlignRight = true, AlignVCenter = true } },
+            ui:Slider{ ID = "ThresholdSlider", Weight = 1, Minimum = 1, Maximum = 9, PageStep = 1,
+                       Value = THRESHOLD, Orientation = "Horizontal", ToolTip = TIPS.threshold },
+            ui:Label{ ID = "ThresholdValue", Text = tostring(THRESHOLD), StyleSheet = FIELD_LABEL,
+                      Weight = 0, MinimumSize = { 10, 0 },
+                      Alignment = { AlignRight = true, AlignVCenter = true } },
+            info(TIPS.threshold),
+        },
+        ui:Label{ ID = "AnalysisLabel", Text = ANALYSIS_HINT, StyleSheet = NOTE, WordWrap = true,
+                  Weight = 0 },
     },
-    ui:Label{ ID = "Meta", Text = "", StyleSheet = META, WordWrap = true },
+
+    ui:VGroup{ Weight = 0, Spacing = 6,
+        heading("RenderHeading", "Render settings"),
+        ui:HGroup{ Weight = 0, Spacing = 8,
+            ui:VGroup{ Weight = 1, Spacing = 4,
+                ui:Button{ ID = "UpscaleCB", Text = "Upscaling", Checkable = true, Checked = DO_UPSCALE,
+                           StyleSheet = TOGGLE, ToolTip = TIPS.upscale, Weight = 0 },
+                mode_line("UpscaleMode", TIPS.upscale),
+            },
+            ui:VGroup{ Weight = 1, Spacing = 4,
+                ui:Button{ ID = "InterpCB", Text = "Interpolate", Checkable = true,
+                           Checked = DO_INTERPOLATE, StyleSheet = TOGGLE, ToolTip = TIPS.interp,
+                           Weight = 0 },
+                mode_line("InterpMode", TIPS.interp),
+            },
+        },
+        row("Output", ui:ComboBox{ ID = "FormatCombo", Weight = 0.8 }, TIPS.format),
+        row("Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.8 }, TIPS.folder),
+    },
+
+    ui:VGroup{ Weight = 0, Spacing = 6,
+        ui:Button{ ID = "SmoothBtn", Text = RENDER_LABEL, StyleSheet = START, ToolTip = TIPS.render,
+                   Weight = 0, MinimumSize = { 0, 44 }, MaximumSize = { 16777215, 44 } },
+        ui:Label{ ID = "ProgressBar", Text = "", StyleSheet = bar_style(nil), Weight = 0,
+                  MinimumSize = { 0, 4 }, MaximumSize = { 16777215, 4 } },
+        ui:Label{ ID = "Progress", Text = "", StyleSheet = PROGRESS, WordWrap = true, Weight = 0 },
+        -- Five lines, as long as a finished render's message runs with the
+        -- import's notes after it. Resolve does not grow a wrapped label to
+        -- fit, and three lines cut that off top and bottom. Held to the top,
+        -- so a short message sits under the progress, not in the middle.
+        ui:Label{ ID = "Status", Text = "Ready.", StyleSheet = STATUS, WordWrap = true, Weight = 0,
+                  MinimumSize = { 0, 76 }, Alignment = { AlignLeft = true, AlignTop = true } },
+        ui:HGroup{ Weight = 0, Spacing = 2,
+            ui:Button{ ID = "CompareBtn", Text = "Show Original", StyleSheet = LINK, Enabled = false, Weight = 0,
+                       ToolTip = "Switch the render off and on to compare it with the original under it." },
+            ui:Button{ ID = "FolderBtn", Text = "Show in Folder", StyleSheet = LINK, Enabled = false, Weight = 0,
+                       ToolTip = "Open the folder the render was saved to." },
+            ui:HGap(0, 1),
+            ui:Button{ ID = "RefreshStatusBtn", Text = "Refresh Progress", StyleSheet = LINK, Weight = 0,
+                       ToolTip = "Read how far the run has got, if the panel stopped updating." },
+            ui:Button{ ID = "CancelBtn", Text = "Reset", StyleSheet = LINK, Weight = 0,
+                       ToolTip = "Clear a run that stopped without finishing." },
+        },
+        ui:Label{ ID = "Meta", Text = "", StyleSheet = META, WordWrap = true, Weight = 0 },
+    },
+    -- Any height the window has to spare goes here, below everything.
+    ui:VGap(0, 1),
 })
 
 
@@ -1102,6 +1172,20 @@ local function fill_folders()
     FILLING_FOLDERS = false
 end
 fill_folders()
+
+-- What each switch does to the render, in the words under it, read from the
+-- switch itself so a setting restored from the config shows too. It says no
+-- more than the flags current_args sends: Upscaling asks for a 2x render
+-- from Real-ESRGAN, which needs a GPU. Without one the file stays at its own
+-- size and Super Scale is set on the imported clip. Interpolate on draws the
+-- in-betweens into a render three times as long, and off keeps the timing.
+local function show_modes()
+    items.UpscaleMode.Text = items.UpscaleCB.Checked
+        and "On: 2x on a GPU, else Super Scale" or "Off: original resolution"
+    items.InterpMode.Text = items.InterpCB.Checked
+        and "On: 3x longer, in-betweens drawn" or "Off: original timing"
+end
+show_modes()
 
 -- ---------------------------------------------------------------------------
 -- state
@@ -2287,11 +2371,13 @@ end
 
 function win.On.UpscaleCB.Clicked(ev)
     DO_UPSCALE = items.UpscaleCB.Checked
+    show_modes()
     save_conf()
 end
 
 function win.On.InterpCB.Clicked(ev)
     DO_INTERPOLATE = items.InterpCB.Checked
+    show_modes()
     save_conf()
 end
 

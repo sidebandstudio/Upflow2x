@@ -316,6 +316,193 @@ def test_a_byte_order_mark_in_version_does_not_leak_into_the_title(lua, direct):
 
 
 # --------------------------------------------------------------------------
+# how the panel reads: its groups, the switches' words, focus and contrast
+# --------------------------------------------------------------------------
+
+def widget_order(lua, H):
+    """The window's widgets with an ID, top to bottom, and for each one the
+    group it sits in, numbered as the groups are met."""
+    walk = lua.eval("""function(H)
+        local ids, parent, groups = {}, {}, 0
+        local function walk(node, group)
+            if node.ID then
+                ids[#ids + 1] = node.ID
+                parent[node.ID] = group
+            end
+            if node.__kind == "VGroup" or node.__kind == "HGroup" then
+                groups = groups + 1
+                group = groups
+            end
+            for _, child in ipairs(node.__children or {}) do walk(child, group) end
+        end
+        walk(H.window.__layout, 0)
+        return table.concat(ids, ","), parent
+    end""")
+    ids, parent = walk(H)
+    return ids.split(","), parent
+
+
+def test_the_panel_reads_as_clip_drawings_settings_then_render(lua, direct):
+    """Everything sat in one column with one hairline. It reads as the
+    Inspector does now: the clip, how its drawings are found, how it renders,
+    then Render with how the run goes under it."""
+    H = load(lua, ui_script(direct))
+    order, parent = widget_order(lua, H)
+    expected = ["ClipHeading", "SourceLabel", "DrawingsHeading", "AnalyseBtn", "ThresholdSlider",
+                "AnalysisLabel", "RenderHeading", "UpscaleCB", "UpscaleMode", "InterpCB",
+                "InterpMode", "FormatCombo", "FolderCombo", "SmoothBtn", "ProgressBar",
+                "Progress", "Status", "CompareBtn", "FolderBtn", "RefreshStatusBtn", "CancelBtn",
+                "Meta"]
+    assert [i for i in order if i in expected] == expected
+    assert parent["AnalyseBtn"] == parent["ThresholdSlider"], "Analyse and its threshold share a row"
+    assert parent["UpscaleCB"] == parent["UpscaleMode"] != parent["InterpCB"] == parent["InterpMode"]
+    assert H.text_of("ClipHeading") == "Clip"
+    assert H.text_of("ClipHeadingNote") == "At the playhead"
+    assert (H.text_of("DrawingsHeading"), H.text_of("DrawingsHeadingNote")) == ("Drawings", "Optional")
+    assert H.text_of("RenderHeading") == "Render settings"
+    assert H.window.__attrs.Geometry[3] == 380
+
+
+AMBER = "#f2a93b"
+
+
+def test_amber_fills_only_render(lua, direct):
+    """Amber filled the slider, the list highlight and both switches, so
+    Render did not stand out. Now it fills only Render and the brand badge."""
+    H = load(lua, ui_script(direct))
+    filled = sorted(i for i in H.widget_ids().split(",")
+                    if f"background-color: {AMBER}" in (H.widgets[i].StyleSheet or ""))
+    assert filled == ["Badge", "SmoothBtn"]
+    assert AMBER not in H.window.__attrs.StyleSheet, "the slider and lists stay grey"
+
+
+SWITCH_WORDS = {
+    ("UpscaleCB", True): "On: 2x on a GPU, else Super Scale",
+    ("UpscaleCB", False): "Off: original resolution",
+    ("InterpCB", True): "On: 3x longer, in-betweens drawn",
+    ("InterpCB", False): "Off: original timing",
+}
+SWITCHES = [(True, True), (True, False), (False, True), (False, False)]
+
+
+def assert_render_matches(H, upscale, interp):
+    """The words under the switches, and the flags Render then sends."""
+    assert H.text_of("UpscaleMode") == SWITCH_WORDS["UpscaleCB", upscale]
+    assert H.text_of("InterpMode") == SWITCH_WORDS["InterpCB", interp]
+    H.click("SmoothBtn")
+    cmd = H.last_command()
+    assert ("--network-upscale" in cmd, "--no-upscale" in cmd) == (upscale, not upscale)
+    assert ("--slow-motion 3" in cmd, "--no-interpolate" in cmd) == (interp, not interp)
+
+
+@pytest.mark.parametrize("upscale,interp", SWITCHES)
+def test_each_switch_says_in_words_what_it_does_to_the_render(lua, direct, upscale, interp):
+    """Only an amber border said a switch was on. The line under each one now
+    says On or Off and what that does, matching the flags Render sends."""
+    H = load(lua, ui_script(direct))
+    # Through the panel's own handlers, away and back, so each change is shown.
+    for switch, on in (("UpscaleCB", upscale), ("InterpCB", interp)):
+        H.set_checkbox(switch, not on)
+        H.set_checkbox(switch, on)
+    assert conf_value(direct, "upscale") == str(upscale).lower()
+    assert conf_value(direct, "interpolate") == str(interp).lower()
+    assert_render_matches(H, upscale, interp)
+
+
+@pytest.mark.parametrize("upscale,interp", SWITCHES)
+def test_a_restored_setting_shows_its_words_from_the_start(lua, direct, upscale, interp):
+    conf = direct / "Installer" / "Eternal2x.conf"
+    conf.write_text(conf.read_text() + f"upscale={str(upscale).lower()}\n"
+                    f"interpolate={str(interp).lower()}\n")
+    H = load(lua, ui_script(direct))
+    assert bool(H.widgets["UpscaleCB"].Checked) == upscale
+    assert bool(H.widgets["InterpCB"].Checked) == interp
+    assert_render_matches(H, upscale, interp)
+
+
+def test_the_upscale_words_do_not_promise_a_2x_file(lua, direct):
+    """Real-ESRGAN draws a 2x file only on a GPU. Without one the file keeps
+    its own size and Super Scale is set on the imported clip, as the stage's
+    own help for the flag says."""
+    from Stages.resolve_smooth import build_parser
+    H = load(lua, ui_script(direct))
+    assert "GPU" in H.text_of("UpscaleMode") and "Super Scale" in H.text_of("UpscaleMode")
+    flag = next(a.help for a in build_parser()._actions if "--network-upscale" in a.option_strings)
+    assert "Without a GPU" in flag and "Super Scale" in flag
+
+
+def style_rule(sheet, selector):
+    """The properties of the first rule for `selector` in a style sheet."""
+    found = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", sheet)
+    assert found, f"no {selector} rule in {sheet}"
+    return {k.strip(): v.strip() for k, _, v in
+            (part.partition(":") for part in found.group(1).split(";")) if v.strip()}
+
+
+def test_a_switch_that_is_on_is_bold_as_well_as_amber(lua, direct):
+    H = load(lua, ui_script(direct))
+    sheet = H.widgets["UpscaleCB"].StyleSheet
+    assert style_rule(sheet, "QPushButton:checked")["font-weight"] == "700"
+    assert "font-weight" not in style_rule(sheet, "QPushButton")
+
+
+def test_every_control_shows_where_keyboard_focus_is(lua, direct):
+    H = load(lua, ui_script(direct))
+    buttons = [i for i in H.widget_ids().split(",") if H.widgets[i].__kind == "Button"]
+    assert len(buttons) >= 9
+    for button in buttons:
+        assert "QPushButton:focus" in H.widgets[button].StyleSheet, button
+    sheet = H.window.__attrs.StyleSheet
+    assert "QComboBox:focus" in sheet and "QSlider::handle:horizontal:focus" in sheet
+    # Stop, waiting for its second press, keeps a focus mark too.
+    H.click("SmoothBtn")
+    H.click("CancelBtn")
+    assert "QPushButton:focus" in H.widgets["CancelBtn"].StyleSheet
+
+
+def luminance(colour):
+    channels = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    r, g, b = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    high, low = sorted((luminance(a), luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_text_on_the_panel_reads_at_4_5_to_1_or_better(lua, direct):
+    """The version and the hints under the links were 3.4:1 on the panel's grey."""
+    H = load(lua, ui_script(direct))
+    panel = style_rule(H.window.__attrs.StyleSheet, "QWidget")["background-color"]
+    checked = 0
+    for wid in H.widget_ids().split(","):
+        widget = H.widgets[wid]
+        kind = {"Label": "QLabel", "Button": "QPushButton"}.get(widget.__kind)
+        if not kind or not widget.StyleSheet:
+            continue
+        rule = style_rule(widget.StyleSheet, kind)
+        if "color" not in rule:
+            continue    # the progress bar, which has no text
+        back = rule.get("background-color", "transparent")
+        back = panel if back == "transparent" else back
+        assert contrast(rule["color"], back) >= 4.5, f"{wid}: {rule['color']} on {back}"
+        checked += 1
+    assert checked >= 20
+
+
+def test_long_messages_have_room_to_wrap(lua, direct):
+    """A finished render's message, with the import's notes after it, runs to
+    five lines at 380 wide, and the box held three. The switches' words get
+    two lines, for a larger font."""
+    H = load(lua, ui_script(direct))
+    status = H.widgets["Status"]
+    assert status.WordWrap and status.MinimumSize[2] >= 72 and status.Alignment.AlignTop
+    for mode in ("UpscaleMode", "InterpMode"):
+        assert H.widgets[mode].WordWrap and H.widgets[mode].MinimumSize[2] >= 28
+
+
+# --------------------------------------------------------------------------
 # the install chain
 # --------------------------------------------------------------------------
 
@@ -2253,7 +2440,8 @@ def test_one_press_of_stop_only_asks(lua, direct):
     assert H.status().startswith("Press Stop again to end the render.")
     assert "deletes the frames" in H.status()
     asking = H.widgets["CancelBtn"].StyleSheet
-    assert asking != plain and "color: #f2a93b; }" in asking.split("}")[0] + "}"
+    armed = style_rule(asking, "QPushButton")
+    assert asking != plain and armed["color"] == AMBER and armed["font-weight"] == "700"
     H.click("CancelBtn")
     assert run_file(direct, "stop").exists()
     assert H.widgets["CancelBtn"].StyleSheet == plain
