@@ -197,26 +197,10 @@ function cell(row, url, label) {
     td.appendChild(a);
 }
 
-// True when version a, like 0.5.1, came out before version b.
-function before(a, b) {
-    var x = a.split('.'), y = b.split('.');
-    for (var i = 0; i < Math.max(x.length, y.length); i++) {
-        var step = (parseInt(x[i], 10) || 0) - (parseInt(y[i], 10) || 0);
-        if (step) return step < 0;
-    }
-    return false;
-}
-
-// With the newest version known, the list can say which ones are older, and
-// a row for the newest or anything after it leaves.
-function showOlder(latest) {
-    var rows = document.getElementById('older-rows');
-    Array.prototype.slice.call(rows.rows).forEach(function (row) {
-        if (!before(row.cells[0].textContent, latest)) rows.removeChild(row);
-    });
-    document.getElementById('older-title').textContent = 'Older versions';
-}
-
+// Only GitHub's release list says which version /releases/latest is. The
+// release workflow moves the update feed after it publishes, so in between, a
+// script that trusted the feed would call the old release the newest and
+// drop its zips.
 fetch('https://api.github.com/repos/' + REPO + '/releases')
     .then(function (res) {
         // A rate-limited API answers with an error object, not a list.
@@ -242,7 +226,8 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
         });
 
         // The API's list replaces the written-in rows, so a release taken
-        // down later loses its row along with its downloads.
+        // down later loses its row along with its downloads. Every row left
+        // came out before the newest, so the heading can say so.
         var rows = document.getElementById('older-rows');
         rows.textContent = '';
         published.slice(1).forEach(function (release) {
@@ -254,26 +239,12 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
             cell(row, assetUrl(release, 'upflow2x-win.zip'), 'Windows zip');
             cell(row, assetUrl(release, 'upflow2x-mac.zip'), 'macOS zip');
         });
-        showOlder(version);
+        document.getElementById('older-title').textContent = 'Older versions';
     })
     .catch(function () {
-        // The API is down or rate limited. The buttons above still open the
-        // newest release, the written-in rows stay, and the update feed, which
-        // has no such limit, still names the version.
-        return fetch('https://raw.githubusercontent.com/' + REPO + '/main/update/latest.json')
-            .then(function (res) {
-                if (!res.ok) throw new Error('feed returned ' + res.status);
-                return res.json();
-            })
-            .then(function (feed) {
-                if (typeof feed.version !== 'string') return;
-                document.querySelectorAll('[data-version]').forEach(function (tag) {
-                    tag.textContent = 'v' + feed.version;
-                    tag.classList.remove('pending');
-                });
-                showOlder(feed.version);
-            })
-            .catch(function () {});
+        // Down or rate limited. Nothing here can say which version is newest,
+        // so the page stays as written: buttons that open the newest release,
+        // a neutral heading, and every written-in zip.
     });
 </script>
 </body>

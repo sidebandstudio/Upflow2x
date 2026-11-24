@@ -369,6 +369,10 @@ def test_the_change_notes_leave_availability_to_the_download_page(repo_root):
 # Rows are written into the page so it still lists downloads without script or
 # with GitHub's API rate limited, and a row goes in before the release after it
 # ships. The page once called 0.5.1 an older version while it was the newest.
+#
+# The release workflow publishes a release, then commits update/latest.json.
+# In between, /releases/latest is the new version and the feed still names the
+# old one, so only GitHub's release list may say which version is newest.
 
 def version_key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
@@ -462,7 +466,7 @@ const title = { textContent: PAGE.title };
 const tags = PAGE.tags.map(t => ({ textContent: t, classList: { remove() {} } }));
 const links = PAGE.assets.map(a => ({ asset: a, href: 'release page', lastChild: { nodeValue: a },
                                       getAttribute: n => n === 'data-asset' ? a : null }));
-const odd = [];
+const odd = [], fetched = [];
 const document = {
     getElementById: id => ({ 'older-rows': body, 'older-title': title })[id] || null,
     querySelectorAll(sel) {
@@ -474,6 +478,7 @@ const document = {
     createElement: () => ({ href: '', textContent: '' }),
 };
 function fetch(url) {
+    fetched.push(url === API ? 'api' : url === FEED ? 'feed' : url);
     const answer = url === API ? ANSWERS.api : url === FEED ? ANSWERS.feed : (odd.push('fetch ' + url), null);
     if (!answer) return Promise.reject(new TypeError('Failed to fetch'));
     return Promise.resolve({ ok: answer.status === 200, status: answer.status,
@@ -487,6 +492,7 @@ setTimeout(() => console.log(JSON.stringify({
                                links: r.cells.slice(2).map(c => c.anchor && c.anchor.href) })),
     tags: tags.map(t => t.textContent),
     downloads: links.map(l => l.href),
+    fetched,
     odd,
 })), 50);
 """
@@ -533,42 +539,52 @@ def run_release_list(repo_root, tmp_path, api, feed) -> dict:
 RATE_LIMITED = {"status": 403, "body": {"message": "API rate limit exceeded"}}
 
 
-@pytest.mark.parametrize("source", ["feed", "api"])
 @pytest.mark.parametrize("newest", ["current", "next"])
-def test_the_release_list_calls_only_earlier_versions_older(repo_root, tmp_path, source, newest):
-    """Once GitHub names the newest version, the heading says Older versions and
-    lists only what came before it. Before the next release that drops the
-    current one. After it, the current one stays with its zips."""
+def test_the_release_list_calls_only_earlier_versions_older(repo_root, tmp_path, newest):
+    """Once GitHub's release list names the newest version, the heading says
+    Older versions and lists what came before it. "next" is the publication
+    window: the release is out and the feed still names the one before it,
+    which keeps its row and zips."""
     html = page(repo_root, "download.html")
     written = [r["version"] for r in written_rows(html)]
     current, following = release_cases(html)
     latest = current if newest == "current" else following
 
-    if source == "feed":
-        api, feed = RATE_LIMITED, {"status": 200, "body": {"version": latest}}
-    else:
-        listed = ([] if newest == "current" else [latest]) + written
-        api, feed = {"status": 200, "body": [released(v) for v in listed]}, None
-    result = run_release_list(repo_root, tmp_path, api, feed)
+    listed = ([] if newest == "current" else [latest]) + written
+    api = {"status": 200, "body": [released(v) for v in listed]}
+    stale_feed = {"status": 200, "body": {"version": current}}
+    result = run_release_list(repo_root, tmp_path, api, stale_feed)
 
-    expected = [v for v in written if version_key(v) < version_key(latest)]
     assert result["title"] == "Older versions"
-    assert [r["version"] for r in result["rows"]] == expected
-    assert all(tag.startswith(f"v{latest}") for tag in result["tags"])
+    assert [r["version"] for r in result["rows"]] == [v for v in written if v != latest]
+    assert all(tag.startswith(f"v{latest} ") for tag in result["tags"])
+    assert result["downloads"] == [zip_url(latest, a) for a in written_assets(html)]
     if newest == "next":
         row = next(r for r in result["rows"] if r["version"] == current)
         assert row["links"] == [zip_url(current, "upflow2x-win.zip"),
                                 zip_url(current, "upflow2x-mac.zip")]
-    if source == "api":
-        assert result["downloads"] == [zip_url(latest, a) for a in written_assets(html)]
+    assert result["fetched"] == ["api"]
 
 
-def test_the_release_list_stays_neutral_when_github_cannot_be_reached(repo_root, tmp_path):
-    """With neither the API nor the feed answering, nothing says which version
-    is the newest, so the list keeps its written-in rows and neutral heading."""
+@pytest.mark.parametrize("api", ["rate limited", "unreachable"])
+@pytest.mark.parametrize("feed", ["current", "next"])
+def test_without_the_release_list_the_page_stays_as_written(repo_root, tmp_path, api, feed):
+    """Without GitHub's release list nothing on the page can say which version
+    is newest, whatever the feed says. During the publication window the feed
+    still names the release before /releases/latest. So the heading stays
+    neutral, every written-in zip stays, the version tags keep their own text
+    and the buttons keep opening the newest release on GitHub."""
     html = page(repo_root, "download.html")
-    result = run_release_list(repo_root, tmp_path, None, None)
+    current, following = release_cases(html)
+    answers = {"rate limited": RATE_LIMITED, "unreachable": None}[api]
+    version = current if feed == "current" else following
+    result = run_release_list(repo_root, tmp_path, answers,
+                              {"status": 200, "body": {"version": version}})
 
+    assert result["title"] == re.search(r'<h2 id="older-title">(.*?)</h2>', html).group(1)
     assert "older" not in result["title"].lower()
-    assert [r["version"] for r in result["rows"]] == [r["version"] for r in written_rows(html)]
+    assert result["rows"] == [{"version": r["version"], "links": r["links"][2:]}
+                              for r in written_rows(html)]
+    assert result["tags"] == re.findall(r"<span[^>]*data-version[^>]*>(.*?)</span>", html)
     assert result["downloads"] == ["release page"] * len(written_assets(html))
+    assert result["fetched"] == ["api"]
