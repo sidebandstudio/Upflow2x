@@ -2282,6 +2282,60 @@ def test_stop_on_a_run_from_an_earlier_panel_does_not_call_it_a_render(lua, dire
     assert (direct / ".eternal2x_status.stop").exists()
 
 
+@pytest.mark.parametrize("asked", [False, True])
+@pytest.mark.parametrize("exited", [False, True])
+def test_a_render_that_finishes_between_looks_is_imported_not_reset(lua, direct, asked,
+                                                                      exited):
+    """Stop pressed once, the render finished before the timer looked again,
+    and the next press found no run going, so it reset as for a dead one. The
+    status went, and Refresh Progress had nothing left to import."""
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    write_status(direct, fraction=0.9, updated=time.time())
+    if asked:
+        H.click("CancelBtn")
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path=str(direct / "shot_smooth.mp4"), updated=time.time())
+    if exited:
+        (direct / ".eternal2x_exit").write_text("0\n")
+    H.click("CancelBtn")
+    assert H.imported_count() == 1
+    assert "above the original" in H.status()
+    assert not (direct / ".eternal2x_status.stop").exists()
+    assert H.enabled("SmoothBtn") and H.text_of("CancelBtn") == "Reset"
+    H.click("RefreshStatusBtn")
+    assert "No run in progress" in H.status()
+    H.click("CancelBtn")
+    assert H.imported_count() == 1
+
+
+def test_a_run_that_stopped_between_looks_says_stopped(lua, direct):
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    press_stop(H)
+    write_status(direct, fraction=0.4, done=True, ok=False, message="Stopped.",
+                 updated=time.time())
+    H.click("CancelBtn")
+    assert H.status() == "Stopped."
+    assert H.imported_count() == 0 and H.enabled("SmoothBtn")
+
+
+def test_a_quiet_run_that_finishes_before_reset_is_imported(lua, direct):
+    """Flagged as stalled, Stop reads Reset. A slow run can still finish then."""
+    import time
+    H = load(lua, ui_script(direct))
+    H.click("SmoothBtn")
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    H.click("RefreshStatusBtn")
+    assert H.text_of("CancelBtn") == "Reset"
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path=str(direct / "shot_smooth.mp4"), updated=time.time())
+    H.click("CancelBtn")
+    assert H.imported_count() == 1
+
+
 def test_reset_of_a_dead_run_needs_one_press(lua, direct):
     """Nothing is lost clearing a run that already ended, so it does not ask."""
     H = load(lua, ui_script(direct))

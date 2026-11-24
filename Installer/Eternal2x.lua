@@ -2006,6 +2006,16 @@ function win.On.RefreshStatusBtn.Clicked(ev)
 end
 
 function win.On.CancelBtn.Clicked(ev)
+    -- A run can finish between the timer's looks. Its result comes first:
+    -- Stop or Reset then found no run going, cleared it as a dead one, and
+    -- the render never came in.
+    if RUNNING then
+        local st = read_status()
+        if st and st.done then
+            apply_status(st)
+            return
+        end
+    end
     if run_in_progress() then
         stop_unasked()
         if not STOP_ASKED then
