@@ -1054,10 +1054,16 @@ end
 -- Each widget a page or a run shows or hides has an ID, as only those can
 -- be reached once the window is built. They start as the main page shows
 -- them, so nothing flashes as it opens.
+-- The width every row is laid out for. Resolve 20.3.1 opened the window 211
+-- wide, and the rows kept this width with Settings and Render cut off, so
+-- the window is held to it as a minimum, width only: a zero height leaves
+-- the height to the layout, page by page.
+local PANEL_WIDTH = 380
 local win = disp:AddWindow({
     ID = "Eternal2x",
     WindowTitle = "Upflow2x  v" .. CURRENT_VERSION,
-    Geometry = { 100, 100, 380, 198 },
+    Geometry = { 100, 100, PANEL_WIDTH, 198 },
+    MinimumSize = { PANEL_WIDTH, 0 },
     StyleSheet = WINDOW,
 }, ui:VGroup{
     Spacing = 10,
@@ -1075,7 +1081,7 @@ local win = disp:AddWindow({
     },
 
     ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = SOURCE,
-              WordWrap = true, MinimumSize = { 0, 18 }, ToolTip = TIPS.clip, Weight = 0 },
+              WordWrap = true, MinimumSize = { PANEL_WIDTH - 20, 18 }, ToolTip = TIPS.clip, Weight = 0 },
 
     -- The main page.
     ui:HGroup{ Weight = 0, Spacing = 8,
@@ -1116,7 +1122,9 @@ local win = disp:AddWindow({
     row("FolderLabel", "Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.75, Hidden = true },
         TIPS.folder),
     -- A checkbox, so its tick says whether it is on.
+    -- Toggled is asked for as well as Clicked, as only Clicked comes unasked.
     ui:CheckBox{ ID = "ChimeCB", Text = "Render chime", Checked = CHIME, Weight = 0, Hidden = true,
+                 Events = { Clicked = true, Toggled = true },
                  ToolTip = "Play a short sound when a finished render lands on the timeline.",
                  StyleSheet = themed([[
                      QCheckBox { color: $text; font-size: 12px; spacing: 8px; }
@@ -1244,6 +1252,8 @@ local RUN_KIND = nil
 --                          only its exit code
 --               "stale"    a run that went quiet, which Reset can clear
 --               "gave_up"  Reset gave up on it, and it may still finish
+--   stop_sent Stop was sent to the run the panel owns, so if it lands
+--             anyway, it makes no sound
 local view = {
     page = "main", timed = false, changed = false, fit_again = false, ticked = false,
     source_height = 18, status_height = 17, progress_height = 16,
@@ -1287,8 +1297,16 @@ local function fit_window()
         height = height + 22 + gap
     end
     if shown.Meta then height = height + lines_of(items.Meta.Text, 56) * 15 + gap end
-    local width = 380
-    pcall(function() width = tonumber(win:Size()[1]) or width end)
+    -- The panel's width, or the window's where someone has made it wider. A
+    -- width read back is never taken when it is narrower: the window can
+    -- report the size it came up at before it is laid out, and taking that
+    -- kept Resolve's 211 wide window from then on.
+    local width = PANEL_WIDTH
+    pcall(function()
+        local size = win:Size()
+        local now = tonumber(size[1] or size.Width)
+        if now and now > width then width = math.floor(now + 0.5) end
+    end)
     pcall(function() win:Resize({ width, height }) end)
     view.fit_again = view.timed
 end
@@ -1449,7 +1467,7 @@ local function show_source(text, tip)
         local height = lines_of(text, 52) * 16 + 2
         if view.source_height ~= height then
             view.source_height = height
-            items.SourceLabel.MinimumSize = { 0, height }
+            items.SourceLabel.MinimumSize = { PANEL_WIDTH - 20, height }
             view.changed = true
         end
         show_what_matters()
@@ -1973,7 +1991,9 @@ local function end_shown()
     return read_file(STATUS_PATH) == ""
 end
 
-local function apply_status(st)
+-- With quiet, as when Stop or Reset finds the run finished, a render that
+-- lands makes no sound. Someone pressing Stop is not waiting for a chime.
+local function apply_status(st, quiet)
     if not st then return false end
     set_progress(st.fraction, st.stage .. time_left(st))
     -- Until the run is done its message only ever says Starting, and shown on
@@ -2039,8 +2059,9 @@ local function apply_status(st)
                 -- Three lines of status leave no room for a tip as well.
                 if hint then set_meta(hint) end
                 -- Only once it is on the timeline, and once, since the
-                -- status is emptied above and nothing imports it again.
-                if landed then chime() end
+                -- status is emptied above and nothing imports it again. Not
+                -- for a run someone asked to stop, which finished anyway.
+                if landed and not quiet and not view.stop_sent then chime() end
             elseif where then
                 -- The status box fits three lines, too few for a path as well.
                 set_meta(short_path(where, 68))
@@ -2233,10 +2254,11 @@ local PENDING = "A finished render has not been added yet. "
 -- A finished run met by Stop, Reset or a new run. This panel's run is
 -- handled as a poll would, importing its render once. A render with no run
 -- to follow, such as one that finished while the panel was closed or after
--- Reset gave up on it, waits for Refresh Progress.
+-- Reset gave up on it, waits for Refresh Progress. With quiet, a render that
+-- lands makes no sound, as apply_status says.
 -- False when there is nothing worth keeping, such as an old failure.
-local function settle(st)
-    if RUNNING then return apply_status(st) end
+local function settle(st, quiet)
+    if RUNNING then return apply_status(st, quiet) end
     if st.ok and st.import_path ~= "" then
         view.recover = "pending"
         set_status(PENDING)
@@ -2374,8 +2396,10 @@ local function launch(ended, extra, marks)
     if ended then
         for _, path in pairs(run_files(last)) do os.remove(path) end
     end
-    -- The new run is the one the panel owns, so the last one's needs go.
+    -- The new run is the one the panel owns, so the last one's needs go,
+    -- and a Stop sent to the last one says nothing of it.
     view.recover = nil
+    view.stop_sent = nil
     LAUNCHED_AT = os.time()
     start_polling()
     return true
@@ -2603,6 +2627,8 @@ function win.On.CancelBtn.Clicked(ev)
         -- next poll handles its result.
         local f = io.open(STOP_PATH, "w")
         if f then f:close() end
+        -- Too late to stop, it may still land, and then without a sound.
+        if f then view.stop_sent = true end
         set_busy(true)
         start_polling()
         set_status(f and "Stopping..." or "Could not stop the run.")
@@ -2614,7 +2640,8 @@ function win.On.CancelBtn.Clicked(ev)
         and RUN_KIND ~= "analysis"
     if state == "gone" then st = claim_status() end
     if st and st.done then
-        if settle(st) then return end
+        -- Found finished by a press of Stop or Reset: it lands with no sound.
+        if settle(st, true) then return end
         -- Nothing worth keeping, and a finished run writes nothing more.
         os.remove(STATUS_PATH)
     end
@@ -2678,10 +2705,21 @@ function win.On.InterpCB.Clicked(ev)
     save_conf()
 end
 
-function win.On.ChimeCB.Clicked(ev)
-    CHIME = items.ChimeCB.Checked == true
+-- Render chime is saved the moment its tick changes. Toggled comes with every
+-- change: a click, Space, and Windows' accessibility Toggle, which sends no
+-- click. Clicked stays for a build that does not send Toggled. A click sends
+-- both, so it is saved only when it differs from what is saved. The state is
+-- the one the event gives, or without one, the box's own.
+local function chime_changed(ev)
+    local on = ev and ev.On
+    if type(on) ~= "boolean" then on = items.ChimeCB.Checked end
+    on = on == true or on == 1
+    if on == CHIME then return end
+    CHIME = on
     save_conf()
 end
+win.On.ChimeCB.Toggled = chime_changed
+win.On.ChimeCB.Clicked = chime_changed
 
 local function run_update(auto_mode)
     if REPO_ROOT == "" then
@@ -2772,6 +2810,10 @@ else
         if AUTO_UPDATE then run_update(true) end
     end
 end
+
+-- Shown, the window is given its size once, whatever it came up at, and
+-- with a timer once more on the first tick, by when Qt has laid it out.
+fit_window()
 
 -- Ticks can only arrive from here on.
 view.since = os.time()

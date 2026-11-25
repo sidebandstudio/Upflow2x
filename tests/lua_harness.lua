@@ -109,13 +109,22 @@ function dispatcher:AddWindow(attrs, layout)
     function win:GetItems() return items end
     function win:Show() self.__shown = true end
     function win:Hide() self.__shown = false end
-    -- Every size the panel asks the window for, in H.resizes, and the last.
+    -- Every size the panel asks the window for, in H.resizes, and the size
+    -- the window then has, in H.size. As in Qt, a window never goes below
+    -- its MinimumSize. Size() reports H.size, or before any Resize the size
+    -- the window opened at: H.native_size models a window that came up at
+    -- another size than its Geometry, as measured in Resolve.
     H.resizes, H.size = {}, nil
     function win:Resize(size)
         H.resizes[#H.resizes + 1] = { size[1], size[2] }
-        H.size = { size[1], size[2] }
+        local least = attrs.MinimumSize or { 0, 0 }
+        H.size = { math.max(size[1], least[1] or 0), math.max(size[2], least[2] or 0) }
     end
-    function win:Size() return H.size or { attrs.Geometry[3], attrs.Geometry[4] } end
+    function win:Size()
+        local size = H.size or H.native_size
+        if size then return { size[1], size[2] } end
+        return { attrs.Geometry[3], attrs.Geometry[4] }
+    end
     function win:AddChild(child)
         if child and child.ID then items[child.ID] = child end
         table.insert(self.__extra, child)
@@ -598,10 +607,30 @@ function H.set_combo(id, index)
     if handler then handler({}) end
 end
 
+-- Whether UIManager hands this widget's `event` to its handler. Clicked
+-- reaches it by default, others only once its Events attribute turns them on.
+local function delivered(id, event)
+    if event == "Clicked" then return true end
+    local events = H.widgets[id].Events
+    return events ~= nil and events[event] == true
+end
+
+-- A click with the mouse, or Space: Qt changes the state, then emits
+-- toggled, then clicked. Each handler gets the new state as On.
 function H.set_checkbox(id, value)
     H.widgets[id].Checked = value
-    local handler = on(id).Clicked
-    if handler then handler({}) end
+    for _, event in ipairs({ "Toggled", "Clicked" }) do
+        local handler = on(id)[event]
+        if handler and delivered(id, event) then handler({ On = value }) end
+    end
+end
+
+-- What Windows' accessibility Toggle does to a checkbox or checkable button:
+-- Qt calls toggle(), which emits toggled and never clicked.
+function H.toggle(id, value)
+    H.widgets[id].Checked = value
+    local handler = on(id).Toggled
+    if handler and delivered(id, "Toggled") then handler({ On = value }) end
 end
 
 function H.combo_items(id)

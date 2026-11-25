@@ -4502,3 +4502,196 @@ def test_on_windows_without_a_hidden_start_there_is_no_chime(lua, tmp_path, repo
     assert "above the original" in H.status()
     assert not (root / ".upflow2x_chime.cmd").exists()
     assert not any("chime" in c for c in H.commands.values())
+
+
+# --------------------------------------------------------------------------
+# the window's width, as Resolve 20.3.1 measured it
+# --------------------------------------------------------------------------
+
+PANEL_WIDTH = 380
+
+
+def load_native(lua, script, size):
+    """The panel in a window Resolve opened at `size` rather than its Geometry."""
+    H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
+    H.native_size = lua.table(*size)
+    H.load(str(script), "/media/shot.mov")
+    return H
+
+
+def asked_widths(H):
+    return [H.resizes[i][1] for i in range(1, len(H.resizes) + 1)]
+
+
+def test_the_window_can_never_be_narrower_than_the_panel(lua, direct):
+    H = load(lua, ui_script(direct))
+    least = H.window.__attrs.MinimumSize
+    assert least is not None and least[1] == PANEL_WIDTH
+    # Left to the layout, so each page and state is as tall as it needs.
+    assert least[2] == 0
+
+
+def test_a_window_that_opens_narrow_gets_the_panels_width(lua, direct):
+    """Resolve opened it 211 wide, with Settings and Render cut off at 370,
+    and the panel took that width back and kept it."""
+    H = load_native(lua, ui_script(direct), (211, 249))
+    assert len(H.resizes) >= 1, "nothing put the width right as it opened"
+    assert H.size[1] == PANEL_WIDTH
+    H.fire("PollTimer", "Timeout")
+    assert H.size[1] == PANEL_WIDTH and set(asked_widths(H)) == {PANEL_WIDTH}
+
+
+def test_clip_row_holds_window_width_even_when_it_wraps(lua, direct):
+    H = load(lua, ui_script(direct))
+    label = H.widgets["SourceLabel"]
+    initial_height = label.MinimumSize[2]
+    assert label.MinimumSize[1] == PANEL_WIDTH - 20
+    H.under_playhead = False
+    follow(H)
+    assert label.MinimumSize[1] == PANEL_WIDTH - 20
+    assert label.MinimumSize[2] > initial_height
+
+
+@pytest.mark.parametrize("step", ["settings", "back", "busy", "recovered"])
+def test_no_page_or_state_asks_for_a_window_narrower_than_the_panel(lua, direct, step):
+    import time
+    if step == "recovered":
+        write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    H = load_native(lua, ui_script(direct), (211, 249))
+    if step == "recovered":
+        assert {"Status", "CancelBtn"} <= shown(H)
+    if step in ("settings", "back"):
+        press(H, "SettingsBtn")
+    if step == "back":
+        press(H, "BackBtn")
+    if step == "busy":
+        press(H, "SmoothBtn")
+        assert "CancelBtn" in shown(H)
+    H.fire("PollTimer", "Timeout")
+    assert asked_widths(H) and min(asked_widths(H)) == PANEL_WIDTH, asked_widths(H)
+    assert H.size[1] == PANEL_WIDTH
+
+
+def test_a_window_made_wider_stays_wider(lua, direct):
+    import time
+    H = load_native(lua, ui_script(direct), (520, 300))
+    press(H, "SettingsBtn")
+    press(H, "BackBtn")
+    press(H, "SmoothBtn")
+    write_status(direct, fraction=0.5, updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert set(asked_widths(H)) == {520}
+
+
+# --------------------------------------------------------------------------
+# Render chime: saved from the event that changed it
+# --------------------------------------------------------------------------
+
+def count_conf_writes(lua, H):
+    lua.globals().H = H
+    lua.execute("""
+        local real_open = io.open
+        H.conf_writes = 0
+        io.open = function(path, mode)
+            if tostring(path):find("Eternal2x%.conf$") and mode == "w" then
+                H.conf_writes = H.conf_writes + 1
+            end
+            return real_open(path, mode)
+        end""")
+
+
+def test_render_chime_ticked_by_accessibility_is_saved_at_once(lua, tmp_path, repo_root):
+    """Windows' accessibility Toggle ticks the box with no click. The panel
+    only listened for clicks, so the tick showed and nothing was saved."""
+    root = chime_tree(tmp_path, repo_root)
+    H = load(lua, ui_script(root))
+    press(H, "SettingsBtn")
+    H.toggle("ChimeCB", True)
+    assert conf_value(root, "render_chime") == "true"
+    H = load(lua, ui_script(root))
+    assert H.widgets["ChimeCB"].Checked is True
+    press(H, "SettingsBtn")
+    H.toggle("ChimeCB", False)
+    assert conf_value(root, "render_chime") == "false"
+    H = load(lua, ui_script(root))
+    assert not H.widgets["ChimeCB"].Checked
+
+
+def test_render_chime_asks_for_both_events_it_handles(lua, tmp_path, repo_root):
+    """Only Clicked reaches a handler unless the Events attribute asks for more."""
+    H = load(lua, ui_script(chime_tree(tmp_path, repo_root)))
+    events = H.widgets["ChimeCB"].Events
+    assert events is not None and events.Toggled is True and events.Clicked is True
+
+
+def test_a_click_on_render_chime_saves_it_once_and_nothing_else(lua, tmp_path, repo_root):
+    root = chime_tree(tmp_path, repo_root)
+    H = load(lua, ui_script(root))
+    press(H, "SettingsBtn")
+    count_conf_writes(lua, H)
+    H.set_checkbox("ChimeCB", True)
+    assert H.conf_writes == 1, "a click comes as Toggled and Clicked, and was saved twice"
+    assert conf_value(root, "render_chime") == "true"
+    # The other settings are saved as the panel has them, unchanged.
+    assert [conf_value(root, k) for k in ("upscale", "interpolate", "format", "threshold")] == [
+        "true", "true", "png", "5"]
+    assert H.widgets["UpscaleCB"].Checked and H.widgets["InterpCB"].Checked
+
+
+def test_render_chime_follows_the_state_its_event_gives(lua, tmp_path, repo_root):
+    """The event's On is the state the tick changed to."""
+    root = chime_tree(tmp_path, repo_root)
+    H = load(lua, ui_script(root))
+    press(H, "SettingsBtn")
+    lua.globals().H = H
+    lua.execute('H.widgets.ChimeCB.Checked = true; H.window.On.ChimeCB.Toggled({ On = true })')
+    assert conf_value(root, "render_chime") == "true"
+    lua.execute('H.widgets.ChimeCB.Checked = false; H.window.On.ChimeCB.Toggled({})')
+    assert conf_value(root, "render_chime") == "false", "with no On, the box's own state counts"
+
+
+# --------------------------------------------------------------------------
+# Render chime: a render Stop finds finished lands without a sound
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("press_at", ["first press", "armed press"])
+def test_a_render_stop_finds_finished_is_imported_once_without_a_chime(
+        lua, tmp_path, repo_root, press_at):
+    import time
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    on_a_mac(lua)
+    H = load(lua, ui_script(root))
+    press(H, "SmoothBtn")
+    write_status(root, fraction=0.9, updated=time.time())
+    if press_at == "armed press":
+        press(H, "CancelBtn")
+        assert H.status().startswith("Press Stop again")
+    write_status(root, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/out.mp4", updated=time.time())
+    press(H, "CancelBtn")
+    assert H.imported_count() == 1 and "above the original" in H.status()
+    assert chimes(H) == [], "pressing Stop rang the chime"
+    assert not run_file(root, "stop").exists()
+    H.fire("PollTimer", "Timeout")
+    refresh_in_settings(H)
+    assert H.imported_count() == 1 and chimes(H) == []
+
+
+def test_a_render_that_lands_after_stop_was_sent_has_no_chime(lua, tmp_path, repo_root):
+    """Too late to stop, it finished, and the next poll brought it in."""
+    import time
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    on_a_mac(lua)
+    H = load(lua, ui_script(root))
+    press(H, "SmoothBtn")
+    write_status(root, fraction=0.95, updated=time.time())
+    press(H, "CancelBtn")
+    press(H, "CancelBtn")
+    assert run_file(root, "stop").exists()
+    write_status(root, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/out.mp4", updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert H.imported_count() == 1 and chimes(H) == []
+    # The next render is a new one, and rings as any other.
+    land_a_render(H, root, import_path="/tmp/next.mp4")
+    assert H.imported_count() == 2 and len(chimes(H)) == 1
