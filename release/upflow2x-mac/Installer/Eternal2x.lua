@@ -208,6 +208,9 @@ local DO_INTERPOLATE = parse_bool(conf["interpolate"], true)
 -- How big a change Analyse counts as a new drawing, 1 to 9, 5 the default.
 local THRESHOLD = math.max(1, math.min(9, math.floor(tonumber(conf["threshold"] or "5") or 5)))
 local FORMAT = conf["format"] or "png"
+-- A short sound when a render lands on the timeline. Off unless turned on,
+-- also for a config from before it existed.
+local CHIME = parse_bool(conf["render_chime"], false)
 
 local RUN_DIR = REPO_ROOT ~= "" and REPO_ROOT or root
 -- The update check runs each time the panel opens, so it logs apart from
@@ -279,6 +282,7 @@ local function save_conf()
     f:write("interpolate=" .. (DO_INTERPOLATE and "true" or "false") .. "\n")
     f:write("threshold=" .. tostring(THRESHOLD) .. "\n")
     f:write("format=" .. FORMAT .. "\n")
+    f:write("render_chime=" .. (CHIME and "true" or "false") .. "\n")
     f:close()
 end
 
@@ -1111,6 +1115,13 @@ local win = disp:AddWindow({
                                               ToolTip = TIPS.format }, TIPS.format),
     row("FolderLabel", "Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.75, Hidden = true },
         TIPS.folder),
+    -- A checkbox, so its tick says whether it is on.
+    ui:CheckBox{ ID = "ChimeCB", Text = "Render chime", Checked = CHIME, Weight = 0, Hidden = true,
+                 ToolTip = "Play a short sound when a finished render lands on the timeline.",
+                 StyleSheet = themed([[
+                     QCheckBox { color: $text; font-size: 12px; spacing: 8px; }
+                     QCheckBox:focus { text-decoration: underline; }
+                 ]]) },
     ui:HGroup{ Weight = 0, Spacing = 8,
         ui:Label{ ID = "SubTitle", Text = "Upflow2x v" .. CURRENT_VERSION, StyleSheet = VERSION,
                   Weight = 0, Hidden = true, Alignment = { AlignLeft = true, AlignVCenter = true } },
@@ -1240,7 +1251,7 @@ local view = {
     main = { "SettingsBtn", "UpscaleCB", "UpscaleMode", "InterpCB", "InterpMode", "SmoothBtn" },
     settings = { "BackBtn", "AnalyseBtn", "ThresholdLabel", "ThresholdSlider", "ThresholdValue",
                  "AnalysisLabel", "OutputLabel", "FormatCombo", "FolderLabel", "FolderCombo",
-                 "SubTitle", "NeedsInfo", "UpdateBtn" },
+                 "ChimeCB", "SubTitle", "NeedsInfo", "UpdateBtn" },
     feedback = { "ProgressBar", "Progress", "Status", "CompareBtn", "FolderBtn",
                  "RefreshStatusBtn", "CancelBtn", "Meta" },
     shown = {},
@@ -1269,7 +1280,7 @@ end
 -- else resizes it, so its size never moves while a run only reports progress.
 local function fit_window()
     local shown, gap = view.shown, 10
-    local height = (view.page == "settings" and 264 or 198) + view.source_height - 18
+    local height = (view.page == "settings" and 289 or 198) + view.source_height - 18
     if shown.Progress then height = height + 4 + view.progress_height + 2 * gap end
     if shown.Status then height = height + view.status_height + gap end
     if shown.CompareBtn or shown.FolderBtn or shown.RefreshStatusBtn or shown.CancelBtn then
@@ -1866,12 +1877,16 @@ local function import_result(st)
     if not rate_ok then
         return true, notes .. " It is in the media pool, not on the timeline.", nil, hint
     end
+    -- Whether it went onto the timeline, above its clip or at the end, and
+    -- not only into the media pool.
+    local landed = false
     if pool.AppendToTimeline then
         local frames = st.sequence_frames > 0 and st.sequence_frames
             or tonumber(clip_property(mpi, "Frames"))
         local track, item, over = place_above(pool, project, mpi, frames, st.slow_motion)
         if track then
             LAST_ITEM = item
+            landed = true
             notes = notes .. ", placed on V" .. track .. " above the original"
             if over > 0 then
                 notes = notes .. string.format(", but it runs %d frame%s past it. Trim its end.",
@@ -1883,11 +1898,12 @@ local function import_result(st)
             local called, appended = pcall(function() return pool:AppendToTimeline({ mpi }) end)
             local added = called and appended and (type(appended) ~= "table" or #appended > 0)
             if added then LAST_ITEM = first_of(appended) end
+            landed = added and true or false
             notes = notes .. (added and ", added to the end of the timeline."
                                     or ". Drag it onto your timeline.")
         end
     end
-    return true, notes, nil, hint
+    return true, notes, nil, hint, landed
 end
 
 -- How long the current stage has left, from its pace since the panel first
@@ -1910,6 +1926,33 @@ end
 local function render_location(st)
     if st.sequence_pattern ~= "" then return st.import_path:match("^(.+)[/\\]") end
     return st.import_path
+end
+
+-- With Render chime on, plays Stages/play_render_chime.py in the configured
+-- Python once a finished render lands on the timeline. It starts out of
+-- sight and is never waited on, and nothing says if it cannot play: a sound
+-- is no reason to hold up or fail a render. On Windows it goes through a
+-- script of its own, never a run's, started with no window as a run is, and
+-- not at all where that cannot be done.
+local function chime()
+    if not CHIME or REPO_ROOT == "" then return end
+    local helper = join_path(REPO_ROOT, "Stages/play_render_chime.py")
+    if not exists(helper) then return end
+    pcall(function()
+        if not is_windows() then
+            execute(shell_quote(PYTHON) .. " " .. shell_quote(helper) .. " >/dev/null 2>&1 &")
+            return
+        end
+        if not hidden_start or launch_problem() then return end
+        local script = join_path(RUN_DIR, ".upflow2x_chime.cmd")
+        local line = shell_quote(PYTHON) .. " " .. shell_quote((helper:gsub("/", "\\")))
+            .. " >nul 2>&1"
+        local f = io.open(script, "wb")
+        if not f then return end
+        f:write("@echo off\r\nchcp 65001 >nul\r\n", (line:gsub("%%", "%%%%")), "\r\n")
+        f:close()
+        hidden_start(".\\" .. basename(script), (RUN_DIR:gsub("/", "\\")))
+    end)
 end
 
 -- Marks the run the panel owns as one whose end a panel has shown, by leaving
@@ -1987,7 +2030,7 @@ local function apply_status(st)
             IMPORTED = true
             LAST_OUTPUT = render_location(st)
             offer_log(false)
-            local ok, notes, where, hint = import_result(st)
+            local ok, notes, where, hint, landed = import_result(st)
             -- A slowed render runs past its original, so off it shows the next shot.
             items.CompareBtn.Enabled = LAST_ITEM ~= nil and st.slow_motion == 1
             items.CompareBtn.Text = "Show Original"
@@ -1995,6 +2038,9 @@ local function apply_status(st)
                 set_status(st.message .. " " .. notes)
                 -- Three lines of status leave no room for a tip as well.
                 if hint then set_meta(hint) end
+                -- Only once it is on the timeline, and once, since the
+                -- status is emptied above and nothing imports it again.
+                if landed then chime() end
             elseif where then
                 -- The status box fits three lines, too few for a path as well.
                 set_meta(short_path(where, 68))
@@ -2629,6 +2675,11 @@ end
 function win.On.InterpCB.Clicked(ev)
     DO_INTERPOLATE = items.InterpCB.Checked
     show_modes()
+    save_conf()
+end
+
+function win.On.ChimeCB.Clicked(ev)
+    CHIME = items.ChimeCB.Checked == true
     save_conf()
 end
 

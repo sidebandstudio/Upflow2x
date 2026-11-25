@@ -114,6 +114,9 @@ PANEL_DEFAULTS = {
     "interpolate": "true",
     "threshold": "5",
     "format": "png",
+    # Settings > Render chime. Off until turned on. A config from before it
+    # gets it off on the next install too, as a saved setting is never reset.
+    "render_chime": "false",
 }
 
 

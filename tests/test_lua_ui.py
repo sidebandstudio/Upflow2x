@@ -324,7 +324,7 @@ MAIN_VIEW = {"Title", "Badge", "SettingsBtn", "SourceLabel", "UpscaleCB", "Upsca
 # Refresh Progress is always in Settings, for a timer that stalls.
 SETTINGS_VIEW = {"Title", "Badge", "BackBtn", "SourceLabel", "AnalyseBtn", "ThresholdLabel",
                  "ThresholdSlider", "ThresholdValue", "AnalysisLabel", "OutputLabel",
-                 "FormatCombo", "FolderLabel", "FolderCombo", "SubTitle", "NeedsInfo",
+                 "FormatCombo", "FolderLabel", "FolderCombo", "ChimeCB", "SubTitle", "NeedsInfo",
                  "UpdateBtn", "RefreshStatusBtn"}
 FEEDBACK = {"ProgressBar", "Progress", "Status", "CompareBtn", "FolderBtn",
             "RefreshStatusBtn", "CancelBtn", "Meta"}
@@ -1016,6 +1016,7 @@ def test_every_control_shows_where_keyboard_focus_is(lua, direct):
         assert "QPushButton:focus" in H.widgets[button].StyleSheet, button
     sheet = H.window.__attrs.StyleSheet
     assert "QComboBox:focus" in sheet and "QSlider::handle:horizontal:focus" in sheet
+    assert "QCheckBox:focus" in H.widgets["ChimeCB"].StyleSheet
     # Stop, waiting for its second press, keeps a focus mark too.
     H.click("SmoothBtn")
     H.click("CancelBtn")
@@ -1048,7 +1049,8 @@ def test_text_on_the_panel_reads_at_4_5_to_1_or_better(lua, direct):
     checked = 0
     for wid in H.widget_ids().split(","):
         widget = H.widgets[wid]
-        kind = {"Label": "QLabel", "Button": "QPushButton"}.get(widget.__kind)
+        kind = {"Label": "QLabel", "Button": "QPushButton",
+                "CheckBox": "QCheckBox"}.get(widget.__kind)
         if not kind or not widget.StyleSheet:
             continue
         rule = style_rule(widget.StyleSheet, kind)
@@ -4323,3 +4325,180 @@ def test_several_shared_frames_read_as_a_plural(lua, direct):
     H.click("RefreshStatusBtn")
     text = H.widgets["AnalysisLabel"].ToolTip
     assert "2 more found frames share timeline frames with others, as the clip runs faster" in text
+
+
+# --------------------------------------------------------------------------
+# Render chime
+# --------------------------------------------------------------------------
+
+CHIME_HELPER = "play_render_chime.py"
+CHIME_PYTHON = "C:/Program Files/Python 311/python.exe"
+
+
+def chime_tree(tmp_path, repo_root, chime=None):
+    """A plugin folder with spaces in its path and in its Python's, with the
+    chime's helper in Stages, as the plugin installs it, and Render chime as
+    given, or no word of it, as in a config from before it."""
+    root = _plugin_tree(tmp_path / "Plug in folder" / "Upflow2x", repo_root)
+    (root / "Stages" / CHIME_HELPER).write_text("# plays the chime\n")
+    lines = [f"repo_root={root}", f"python={CHIME_PYTHON}",
+             "update_url=https://example.com/latest.json", "auto_update=false"]
+    if chime is not None:
+        lines.append(f"render_chime={'true' if chime else 'false'}")
+    (root / "Installer" / "Eternal2x.conf").write_text("\n".join(lines) + "\n")
+    return root
+
+
+def on_a_mac(lua):
+    lua.execute('package.config = "/" .. package.config:sub(2)')
+
+
+def chimes(H):
+    """The chime commands the panel ran on the macOS path."""
+    return [c for c in H.commands.values() if CHIME_HELPER in c]
+
+
+def land_a_render(H, root, **fields):
+    """Render, and the render finishes, read by the timer as a person waits."""
+    import time
+    press(H, "SmoothBtn")
+    status = {"fraction": 1.0, "done": True, "ok": True, "message": "Rendered.",
+              "import_path": "/tmp/out.mp4", "updated": time.time()}
+    status.update(fields)
+    write_status(root, **status)
+    H.fire("PollTimer", "Timeout")
+
+
+def test_render_chime_is_a_settings_checkbox_off_by_default_and_saved_at_once(
+        lua, tmp_path, repo_root):
+    root = chime_tree(tmp_path, repo_root)
+    H = load(lua, ui_script(root))
+    assert shown(H) == MAIN_VIEW, "the main view changed"
+    press(H, "SettingsBtn")
+    assert "ChimeCB" in shown(H)
+    assert H.text_of("ChimeCB") == "Render chime" and not H.widgets["ChimeCB"].Checked
+    H.set_checkbox("ChimeCB", True)
+    assert conf_value(root, "render_chime") == "true"
+    H = load(lua, ui_script(root))
+    assert H.widgets["ChimeCB"].Checked is True
+    press(H, "SettingsBtn")
+    H.set_checkbox("ChimeCB", False)
+    assert conf_value(root, "render_chime") == "false"
+
+
+def test_a_render_that_lands_chimes_once(lua, tmp_path, repo_root):
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    on_a_mac(lua)
+    H = load(lua, ui_script(root))
+    land_a_render(H, root)
+    assert "placed on V2 above the original" in H.status()
+    # The plugin folder as its config gives it, and the helper under it.
+    helper = f"{root}/Stages/{CHIME_HELPER}"
+    assert chimes(H) == [f"'{CHIME_PYTHON}' '{helper}' >/dev/null 2>&1 &"]
+    H.fire("PollTimer", "Timeout")
+    refresh_in_settings(H)
+    assert len(chimes(H)) == 1, "it chimed again for the same render"
+    H = load(lua, ui_script(root))
+    refresh_in_settings(H)
+    assert chimes(H) == [], "a reopened panel chimed for a render already in"
+
+
+def test_a_render_brought_in_with_refresh_chimes_once(lua, tmp_path, repo_root):
+    """Finished while the panel was closed, and brought in by hand."""
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    write_status(root, fraction=1.0, done=True, ok=True, message="Done.",
+                 import_path=str(root / "shot_smooth.mp4"))
+    on_a_mac(lua)
+    H = load(lua, ui_script(root))
+    assert chimes(H) == []
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1 and len(chimes(H)) == 1
+    refresh_in_settings(H)
+    assert len(chimes(H)) == 1
+
+
+def test_a_render_added_at_the_end_of_another_timeline_chimes(lua, tmp_path, repo_root):
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    on_a_mac(lua)
+    H = load(lua, ui_script(root))
+    press(H, "SmoothBtn")
+    H.timeline_id = "another timeline"
+    import time
+    write_status(root, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/out.mp4", updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert "added to the end of the timeline" in H.status() and len(chimes(H)) == 1
+
+
+@pytest.mark.parametrize("case", ["off", "failed", "stopped", "analysis", "media pool only",
+                                  "import refused", "no render path", "still running",
+                                  "helper missing"])
+def test_no_chime_unless_a_render_lands_with_render_chime_on(lua, tmp_path, repo_root, case):
+    import time
+    root = chime_tree(tmp_path, repo_root, chime=None if case == "off" else True)
+    if case == "helper missing":
+        (root / "Stages" / CHIME_HELPER).unlink()
+    on_a_mac(lua)
+    H = load(lua, ui_script(root))
+    if case == "analysis":
+        press(H, "SettingsBtn")
+        press(H, "AnalyseBtn")
+        write_status(root, fraction=1.0, done=True, ok=True, message="Animated on 2s.",
+                     marks="0,2", updated=time.time())
+        H.fire("PollTimer", "Timeout")
+        assert H.status() == "Check the markers, then press Render."
+    elif case == "failed":
+        land_a_render(H, root, ok=False, message="The clip's media is missing.")
+    elif case == "stopped":
+        land_a_render(H, root, ok=False, message="Stopped.")
+    elif case == "media pool only":
+        H.fps_sticks = False
+        land_a_render(H, root, import_path="/tmp/out/frame_000000.png",
+                      sequence_pattern="/tmp/out/frame_%06d.png", sequence_frames=120,
+                      fps=60.0)
+        assert "in the media pool, not on the timeline" in H.status()
+    elif case == "import refused":
+        H.import_works = False
+        land_a_render(H, root)
+        assert "would not import" in H.status()
+    elif case == "no render path":
+        land_a_render(H, root, import_path="")
+    elif case == "still running":
+        land_a_render(H, root, done=False, ok=False, fraction=0.6)
+        assert H.text_of("CancelBtn") == "Stop"
+    else:
+        land_a_render(H, root)
+        assert "above the original" in H.status()
+    assert chimes(H) == []
+
+
+def test_on_windows_the_chime_starts_with_no_window_from_a_script_of_its_own(
+        lua, tmp_path, repo_root):
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    lua.execute('package.config = "\\\\" .. package.config:sub(2)')
+    lua.execute(FAKE_FFI)
+    H = load(lua, ui_script(root))
+    land_a_render(H, root)
+    created = [lua.eval("CREATED")[i] for i in range(1, len(lua.eval("CREATED")) + 1)]
+    started = [c for c in created if c.line.endswith(" /c .\\.upflow2x_chime.cmd")]
+    assert len(started) == 1
+    assert started[0].flags == 0x08000000, "it would open a window"
+    assert started[0].cwd == str(root).replace("/", "\\")
+    script = (root / ".upflow2x_chime.cmd").read_bytes().decode("utf-8")
+    helper = str(root / "Stages" / CHIME_HELPER).replace("/", "\\")
+    assert script == ('@echo off\r\nchcp 65001 >nul\r\n'
+                      f'"{CHIME_PYTHON}" "{helper}" >nul 2>&1\r\n')
+    assert not any(CHIME_HELPER in c or "chime" in c for c in H.commands.values()), \
+        "it also ran in a console"
+    assert CHIME_HELPER not in run_file(root, "script").read_text(), "it used the run's script"
+
+
+def test_on_windows_without_a_hidden_start_there_is_no_chime(lua, tmp_path, repo_root):
+    """A minimised console for a sound is worse than no sound."""
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    lua.execute('package.config = "\\\\" .. package.config:sub(2)')
+    H = load(lua, ui_script(root))
+    land_a_render(H, root)
+    assert "above the original" in H.status()
+    assert not (root / ".upflow2x_chime.cmd").exists()
+    assert not any("chime" in c for c in H.commands.values())

@@ -224,10 +224,10 @@ skip Analyse and mark the frames yourself.
 ### Settings
 
 Upscaling and Interpolate are on the main panel. In 0.5.2, **Settings** opens
-Analyse and Threshold, Output and Save to, and Check for Updates, and **Back**
-returns to the main panel. In 0.5.1 they're all on the main panel. The panel
-remembers each choice between sessions, with nothing to save. Rest the pointer
-on one to see what it does.
+Analyse and Threshold, Output and Save to, Render chime, and Check for
+Updates, and **Back** returns to the main panel. In 0.5.1 they're all on the
+main panel. The panel remembers each choice between sessions, with nothing to
+save. Rest the pointer on one to see what it does.
 
 | Setting | What it does |
 |---|---|
@@ -235,6 +235,7 @@ on one to see what it does.
 | **Interpolate** | On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, and falls back to the CPU, about ten times slower. If its Python already has ONNX Runtime without DirectML, that one is used, on the CPU. Its first run installs ONNX Runtime and downloads the model, about 50 MB in all, so it needs a connection once; without one, every drawing is kept as drawn and the panel says why. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off skips the in-betweens, so every drawing comes back on its original frame and the render keeps the clip's length. With Upscaling on, that only upscales. |
 | **Threshold** | How big a change Analyse counts as a new drawing, 1 to 9. Lower catches small moves, like only a mouth or a slow drift. Higher counts only big ones, like the whole shot moving. It does nothing to frames you have marked. |
 | **Output** | `Image sequence` is lossless and the most reliable to import. `MP4` is a single compact file but lossy. `MKV` is a lossless single file. All three are 8-bit RGB: transparency and 10-bit colour in the source are not kept. MP4 and MKV need an even width and height. |
+| **Render chime** | From 0.5.2, in Settings and off until you turn it on. It plays once, after the render is added to the timeline. It never adds sound to the clip or to an export. |
 
 ### What it will not do
 

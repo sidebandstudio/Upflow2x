@@ -658,3 +658,23 @@ def test_a_fresh_install_has_no_quality_setting(tmp_path):
     """The in-betweens are always drawn by the network, so there is no choice."""
     conf = inst.write_config(tmp_path, Path("/repo"), "python3").read_text()
     assert "quality=" not in conf
+
+
+@pytest.mark.parametrize("module", ["Installer.install_upflow2x", "Installer.gui_installer"])
+def test_render_chime_starts_off_and_a_chosen_one_is_kept(tmp_path, module):
+    """Off in a fresh install, off for a config from before it, and kept by
+    a reinstall once the panel has saved it."""
+    import importlib
+    installer = importlib.import_module(module)
+    fresh = installer.write_config(tmp_path, Path("/plugin"), "/usr/bin/python3")
+    assert read_conf(fresh)["render_chime"] == "false"
+
+    old = {k: v for k, v in read_conf(fresh).items() if k != "render_chime"}
+    fresh.write_text("".join(f"{k}={v}\n" for k, v in old.items()), encoding="utf-8")
+    assert read_conf(installer.write_config(tmp_path, Path("/plugin"),
+                                            "/usr/bin/python3"))["render_chime"] == "false"
+
+    fresh.write_text(fresh.read_text(encoding="utf-8").replace(
+        "render_chime=false", "render_chime=true"), encoding="utf-8")
+    assert read_conf(installer.write_config(tmp_path, Path("/plugin"),
+                                            "/usr/bin/python3"))["render_chime"] == "true"

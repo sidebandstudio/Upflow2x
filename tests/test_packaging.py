@@ -154,6 +154,52 @@ def test_release_includes_the_lua_scripts(repo_root, release):
         assert (base / "Installer" / name).exists(), f"{release} is missing {name}"
 
 
+CHIME = ("Stages", "render-complete.wav")
+
+
+@pytest.mark.parametrize("release", RELEASES)
+def test_release_ships_the_render_chime_beside_its_player(repo_root, release):
+    """The panel runs Stages/play_render_chime.py, which plays the WAV beside
+    it. The .py is checked with the rest of the code above. The WAV isn't."""
+    base = repo_root / "release" / release
+    if not base.exists():
+        pytest.skip(f"{release} not built")
+    assert (base / "Stages" / "play_render_chime.py").exists()
+    shipped = base.joinpath(*CHIME)
+    assert shipped.exists(), f"{release} is missing {'/'.join(CHIME)}"
+    assert shipped.read_bytes() == repo_root.joinpath(*CHIME).read_bytes(), f"{release} has a stale chime"
+
+
+def test_the_zip_setup_and_updates_all_carry_the_render_chime(repo_root, tmp_path):
+    """The chime reaches users three ways: inside the release zip, inside setup,
+    which copies its bundled plugin into Resolve's folder, and in an update.
+    Each copies the WAV byte for byte."""
+    import zipfile
+
+    from Installer import build_release, gui_installer
+    from Stages import resolve_update
+
+    wav = repo_root.joinpath(*CHIME).read_bytes()
+    assert "Stages" in build_release.PAYLOAD and "Stages" in resolve_update.PAYLOAD_NAMES
+
+    # The release zip, and setup's bundle, which build_installer copies the same way.
+    folder = tmp_path / "upflow2x-win"
+    build_release._copy(repo_root / "Stages", folder / "Stages")
+    with zipfile.ZipFile(build_release.zip_folder(folder)) as archive:
+        assert archive.read("upflow2x-win/" + "/".join(CHIME)) == wav
+
+    # Setup copying its bundle into Resolve's folder.
+    installed = tmp_path / "installed"
+    gui_installer._copy_plugin(folder, installed)
+    assert installed.joinpath(*CHIME).read_bytes() == wav
+
+    # An update applied over an install from before the chime.
+    live = tmp_path / "live"
+    (live / "Stages").mkdir(parents=True)
+    resolve_update._apply_payload(folder, live)
+    assert live.joinpath(*CHIME).read_bytes() == wav
+
+
 # --------------------------------------------------------------------------
 # source sanity
 # --------------------------------------------------------------------------
