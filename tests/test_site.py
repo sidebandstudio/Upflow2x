@@ -412,6 +412,22 @@ def test_settings_names_its_controls_the_way_back_and_both_versions(repo_root, d
     assert "0.5.1" in text and "0.5.2" in text
 
 
+@pytest.mark.parametrize("doc", ["help.html", "README.md"])
+def test_the_render_chime_reads_as_new_off_and_timeline_only(repo_root, doc):
+    """The chime is new in 0.5.2, so the line about 0.5.1's main panel can't
+    take it along, and it plays only once a render is on the timeline."""
+    if doc == "help.html":
+        section = re.search(r'<section id="settings".*?</section>', page(repo_root, doc), re.S).group()
+    else:
+        section = readme(repo_root).split("\n### Settings\n")[1].split("\n###")[0]
+    sentences = re.split(r"(?<=\.) (?=[A-Z0-9])", plain(section))
+    old = [s for s in sentences if "0.5.1" in s]
+    assert old and all(re.search(r"\bno render chime\b", s, re.I) for s in old), old
+    # Its own entry is the last mention in both.
+    chime = plain(section).lower().rsplit("render chime", 1)[-1]
+    assert "0.5.2" in chime and "off until" in chime and "timeline" in chime, chime
+
+
 # --------------------------------------------------------------------------
 # the download page's release list
 # --------------------------------------------------------------------------
