@@ -955,6 +955,29 @@ def test_missing_packages_are_reported_to_the_panel(monkeypatch, tmp_path):
     assert "cv2" in payload["message"]
 
 
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_failure_log_is_readable_when_the_panel_sees_done(monkeypatch, tmp_path, json_mode):
+    monkeypatch.setattr(smooth, "IMPORT_ERROR", ImportError("No module named 'cv2'"))
+    status = tmp_path / "status.json"
+    log = tmp_path / "run.log"
+    replace = Path.replace
+    at_publish = []
+
+    def inspect_publish(temp, target):
+        result = replace(temp, target)
+        if target == status:
+            at_publish.append(log.read_text(encoding="utf-8"))
+        return result
+
+    monkeypatch.setattr(Path, "replace", inspect_publish)
+    with log.open("w", encoding="utf-8") as stream:
+        monkeypatch.setattr(sys, "stderr" if json_mode else "stdout", stream)
+        args = ["--video", "x.mov", "--status-file", str(status)]
+        assert run(monkeypatch, args + (["--json"] if json_mode else [])) == 3
+    assert len(at_publish) == 1
+    assert "No module named 'cv2'" in at_publish[0]
+
+
 def test_the_final_status_survives_a_reader_holding_the_file(tmp_path, monkeypatch):
     """Windows refuses the replace while the panel has the file open."""
     status = smooth.StatusFile(str(tmp_path / "status.json"))
