@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -96,6 +97,75 @@ BORDER = "#1e1e26"
 _NO_WINDOW = ({"creationflags": subprocess.CREATE_NO_WINDOW}
               if sys.platform.startswith("win") else {})
 
+# pip builds a package it has no wheel for in processes of its own, a build
+# backend and a compiler. Ending pip alone left those running, and any that
+# held pip's output kept setup's read of it waiting. So each child setup
+# starts goes in a job object of its own on Windows, or a session of its own
+# elsewhere, and is ended with everything it started.
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class _JobLimits(ctypes.Structure):
+        """JOBOBJECT_EXTENDED_LIMIT_INFORMATION. Setup sets only flags."""
+        _fields_ = [("time_limits", ctypes.c_int64 * 2), ("flags", wintypes.DWORD),
+                    ("working_set", ctypes.c_size_t * 2), ("process_limit", wintypes.DWORD),
+                    ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                    ("scheduling", wintypes.DWORD), ("io", ctypes.c_uint64 * 6),
+                    ("memory", ctypes.c_size_t * 4)]
+
+    # A kernel32 of its own, so these argument types change nothing elsewhere.
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    _kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int,
+                                                  wintypes.LPVOID, wintypes.DWORD)
+    _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+
+def _start(args: list[str], **kwargs) -> tuple[subprocess.Popen, int | None]:
+    """Start a child that _end can stop with every process it starts. Returns
+    it and, on Windows, its job object, or None where Windows refused one."""
+    if os.name != "nt":
+        return subprocess.Popen(args, start_new_session=True, **kwargs, **_NO_WINDOW), None
+    child = subprocess.Popen(args, **kwargs, **_NO_WINDOW)
+    # It joins the job just after it starts, which is long before pip can
+    # have started a build.
+    job = _kernel32.CreateJobObjectW(None, None)
+    # Closing the last handle to the job ends whatever is left in it, so
+    # setup exiting, however it exits, leaves nothing running.
+    limits = _JobLimits(flags=0x2000)  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if job and not (_kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits),
+                                                      ctypes.sizeof(limits))
+                    and _kernel32.AssignProcessToJobObject(job, child._handle)):
+        _kernel32.CloseHandle(job)
+        job = None
+    return child, job
+
+
+def _end(child: subprocess.Popen, job: int | None) -> None:
+    """Stop child and every process it started. Their copies of its output
+    pipe close with them, so a read of it ends too."""
+    if job:
+        _kernel32.TerminateJobObject(job, 1)
+    elif os.name == "nt":
+        # Without a job only the child itself can be ended.
+        child.kill()
+    else:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except OSError:
+            # Its session has ended already, or can't be signalled. End the
+            # child itself, as before.
+            child.kill()
+
+
+def _close_job(job: int | None) -> None:
+    if job:
+        _kernel32.CloseHandle(job)
+
 
 def _find_repo_root() -> Path:
     if getattr(sys, "frozen", False):
@@ -127,22 +197,24 @@ def _read_version(repo_root: Path) -> str:
     return "?"
 
 
-def _check_python(path: str) -> bool:
+# The checks below run Python through `run`, which setup gives them: like
+# subprocess.run with the output captured, but in a child Quit can end, and
+# none starts after Quit.
+
+def _check_python(path: str, run) -> bool:
     try:
-        result = subprocess.run(
-            [path, "-c", "import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] < (3, 15)))"],
-            capture_output=True, text=True, timeout=10, **_NO_WINDOW,
-        )
+        result = run(
+            [path, "-c", "import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] < (3, 15)))"])
         return result.returncode == 0
     except Exception:
         return False
 
 
-def _find_system_python() -> str | None:
+def _find_system_python(run) -> str | None:
     # Run as a script, the Python running this window is the one the user
     # chose, such as `py Installer\gui_installer.py` with nothing on PATH.
     if (not getattr(sys, "frozen", False) and sys.executable
-            and _check_python(sys.executable)):
+            and _check_python(sys.executable, run)):
         return sys.executable
     candidates = (
         ["python", "python3"] if sys.platform.startswith("win")
@@ -150,7 +222,7 @@ def _find_system_python() -> str | None:
     )
     for name in candidates:
         path = shutil.which(name)
-        if path and _check_python(path):
+        if path and _check_python(path, run):
             return path
     return None
 
@@ -178,7 +250,7 @@ def _embedded_python_exe(repo_root: Path) -> Path:
     return repo_root / "python" / "bin" / "python3"
 
 
-def _find_embedded_python(repo_root: Path) -> str | None:
+def _find_embedded_python(repo_root: Path, run) -> str | None:
     exe = _embedded_python_exe(repo_root)
     # Older installers left the ._pth without the plugin folder. Repair it
     # before reusing this Python, or the panel still cannot import Stages.
@@ -187,20 +259,16 @@ def _find_embedded_python(repo_root: Path) -> str | None:
             pth.write_text(_patch_pth(pth.read_text(encoding="utf-8")), encoding="utf-8")
         except OSError:
             pass
-    if exe.exists() and _check_python(str(exe)):
-        result = subprocess.run([str(exe), "-m", "pip", "--version"],
-                                capture_output=True, text=True, timeout=10, **_NO_WINDOW)
+    if exe.exists() and _check_python(str(exe), run):
+        result = run([str(exe), "-m", "pip", "--version"])
         if result.returncode == 0:
             return str(exe)
     return None
 
 
-def _python_version_str(python_path: str) -> str:
+def _python_version_str(python_path: str, run) -> str:
     try:
-        r = subprocess.run(
-            [python_path, "--version"],
-            capture_output=True, text=True, timeout=10, **_NO_WINDOW,
-        )
+        r = run([python_path, "--version"])
         return (r.stdout + r.stderr).strip()
     except Exception:
         return python_path
@@ -327,11 +395,14 @@ class InstallerApp:
         self.install_done = False
         self.python_path: str | None = None
         # Quit sets _quit and ends _child, the process the install thread is
-        # waiting on. Neither thread holds the lock for more than a moment,
-        # so Quit never waits on the install thread.
+        # waiting on, with everything it started, through its job, _job, on
+        # Windows. The job is used and closed only under the lock, and
+        # neither thread holds it for more than a moment, so Quit never waits
+        # on the install thread.
         self._quit = threading.Event()
         self._child_lock = threading.Lock()
         self._child: subprocess.Popen | None = None
+        self._job: int | None = None
         self._worker: threading.Thread | None = None
 
         self._build_ui()
@@ -530,9 +601,8 @@ class InstallerApp:
         # thread, which sees _quit once Popen returns.
         with self._child_lock:
             self._quit.set()
-            child = self._child
-        if child is not None:
-            child.kill()
+            if self._child is not None:
+                _end(self._child, self._job)
         self.root.destroy()
 
     def _check_quit(self):
@@ -544,20 +614,45 @@ class InstallerApp:
         """Start a child process that Quit can end. After a quit none starts,
         and one that was starting as Quit was pressed is ended at once."""
         self._check_quit()
-        child = subprocess.Popen(args, **kwargs, **_NO_WINDOW)
+        child, job = _start(args, **kwargs)
         with self._child_lock:
             quit_meanwhile = self._quit.is_set()
             if not quit_meanwhile:
-                self._child = child
+                self._child, self._job = child, job
         if quit_meanwhile:
-            child.kill()
+            _end(child, job)
+            _close_job(job)
             raise _Quit()
         return child
+
+    def _stop(self, child: subprocess.Popen):
+        """End child with everything it started, unless it has been released."""
+        with self._child_lock:
+            if self._child is child:
+                _end(child, self._job)
 
     def _release(self, child: subprocess.Popen):
         with self._child_lock:
             if self._child is child:
-                self._child = None
+                # On Windows, closing the job ends anything the child left running.
+                _close_job(self._job)
+                self._child = self._job = None
+
+    def _run_child(self, args: list[str], timeout: float = 10,
+                   **kwargs) -> subprocess.CompletedProcess:
+        """subprocess.run with the output captured, for a child Quit can end."""
+        child = self._launch(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, **kwargs)
+        try:
+            stdout, stderr = child.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._stop(child)
+            child.communicate()
+            raise
+        finally:
+            self._release(child)
+        self._check_quit()
+        return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
 
     # ---- Embedded Python: Windows -----------------------------------------
 
@@ -611,23 +706,13 @@ class InstallerApp:
 
         try:
             # Started like pip itself, so Quit can end it.
-            child = self._launch(
+            result = self._run_child(
                 [python_exe, str(get_pip_path), "--no-warn-script-location"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                cwd=str(python_dir),
+                timeout=120, cwd=str(python_dir),
             )
-            try:
-                _, stderr = child.communicate(timeout=120)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.communicate()
-                raise
-            finally:
-                self._release(child)
-            self._check_quit()
-            if child.returncode != 0:
+            if result.returncode != 0:
                 self.root.after(0, self._log,
-                                f"  pip setup failed: {stderr.strip()[:200]}", "err")
+                                f"  pip setup failed: {result.stderr.strip()[:200]}", "err")
                 return None
         except Exception as exc:
             self.root.after(0, self._log, f"  pip setup error: {exc}", "err")
@@ -706,7 +791,7 @@ class InstallerApp:
         self.root.after(0, self._set_progress, 30, "Verifying Python...")
 
         self._check_quit()
-        if not _check_python(python_exe):
+        if not _check_python(python_exe, self._run_child):
             self.root.after(0, self._log, "  Extracted Python is not working.", "err")
             return None
 
@@ -743,7 +828,7 @@ class InstallerApp:
 
         def give_up():
             timed_out.set()
-            proc.kill()
+            self._stop(proc)
 
         timer = threading.Timer(PIP_TIMEOUT, give_up)
         # A daemon, so it never keeps setup running after its window closes.
@@ -805,21 +890,22 @@ class InstallerApp:
 
         # Each check runs Python, so none starts once setup has been quit.
         self._check_quit()
-        python_path = _find_embedded_python(self.repo_root)
+        python_path = _find_embedded_python(self.repo_root, self._run_child)
         python_source = "embedded"
 
         self._check_quit()
         if python_path:
             self.root.after(0, self._log,
-                            f"  Using bundled Python: {_python_version_str(python_path)}", "ok")
+                            f"  Using bundled Python: "
+                            f"{_python_version_str(python_path, self._run_child)}", "ok")
         elif not getattr(sys, "frozen", False):
-            python_path = _find_system_python()
+            python_path = _find_system_python(self._run_child)
             python_source = "system"
 
         self._check_quit()
         if python_path and python_source == "system":
             self.root.after(0, self._log,
-                            f"  Found: {_python_version_str(python_path)}", "ok")
+                            f"  Found: {_python_version_str(python_path, self._run_child)}", "ok")
 
         if not python_path:
             self.root.after(0, self._log,

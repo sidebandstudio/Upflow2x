@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -29,8 +31,8 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "_MEIPASS", str(source.parent), raising=False)
     monkeypatch.setattr(gui, "_resolve_scripts_dir", lambda: scripts)
     monkeypatch.setattr(gui, "remove_old_install", lambda: None)
-    monkeypatch.setattr(gui, "_find_embedded_python", lambda root: None)
-    monkeypatch.setattr(gui, "_find_system_python", lambda: pytest.fail("used system Python"))
+    monkeypatch.setattr(gui, "_find_embedded_python", lambda root, run: None)
+    monkeypatch.setattr(gui, "_find_system_python", lambda run: pytest.fail("used system Python"))
     app = gui.InstallerApp.__new__(gui.InstallerApp)
     app.source_root = gui._find_repo_root()
     app.repo_root = destination
@@ -39,8 +41,8 @@ def setup(tmp_path, monkeypatch):
     app._log = lambda *args: None
     app._set_progress = lambda *args: None
     app.install_done = False
-    app._quit, app._child_lock, app._child, app._worker = (
-        threading.Event(), threading.Lock(), None, None)
+    app._quit, app._child_lock, app._child, app._job, app._worker = (
+        threading.Event(), threading.Lock(), None, None, None)
 
     def download_python():
         path = gui._embedded_python_exe(destination)
@@ -88,7 +90,7 @@ def test_reinstall_reuses_private_python_and_preserves_settings(setup, monkeypat
     config = scripts / "Eternal2x.conf"
     config.write_text(config.read_text().replace("threshold=5", "threshold=8"))
     monkeypatch.setattr(gui, "_find_embedded_python",
-                        lambda root: str(gui._embedded_python_exe(root)))
+                        lambda root, run: str(gui._embedded_python_exe(root)))
     app._setup_embedded_python = lambda: pytest.fail("downloaded Python again")
     app._do_install()
     assert "threshold=8" in config.read_text()
@@ -113,10 +115,9 @@ def test_an_incomplete_private_python_is_not_reused(tmp_path, monkeypatch):
     path = gui._embedded_python_exe(tmp_path)
     path.parent.mkdir(parents=True)
     path.touch()
-    monkeypatch.setattr(gui, "_check_python", lambda path: True)
-    monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k:
-                        subprocess.CompletedProcess(a[0], 1))
-    assert gui._find_embedded_python(tmp_path) is None
+    monkeypatch.setattr(gui, "_check_python", lambda path, run: True)
+    assert gui._find_embedded_python(
+        tmp_path, lambda args: subprocess.CompletedProcess(args, 1)) is None
 
 
 @pytest.mark.parametrize("platform", ["win32", "darwin"])
@@ -170,8 +171,8 @@ def window(**attrs):
     app.install_btn = mock.MagicMock()
     app.source_root = Path("/no/plugin")
     app.installing = app.install_done = False
-    app._quit, app._child_lock, app._child, app._worker = (
-        threading.Event(), threading.Lock(), None, None)
+    app._quit, app._child_lock, app._child, app._job, app._worker = (
+        threading.Event(), threading.Lock(), None, None, None)
     app.logged = []
     app._log = lambda msg, tag=None: app.logged.append((msg, tag))
     for key, value in attrs.items():
@@ -201,6 +202,11 @@ class FakePip:
     """pip as Popen sees it: its lines, then its exit code. With hang it runs
     until killed, with times_out a wait given a timeout runs out, and with a
     gate Popen does not return until the gate opens."""
+
+    # No process behind it. No process group has this number, which is above
+    # every system's limit on process IDs, and a null handle joins no job.
+    pid = 2 ** 30
+    _handle = None
 
     def __init__(self, lines=(), code=0, hang=False, times_out=False, gate=None):
         self.lines, self.code, self.hang = lines, code, hang
@@ -536,7 +542,7 @@ def test_a_quit_install_thread_runs_no_more_checks(setup, monkeypatch):
     """Even the quick Python checks start nothing once setup has quit."""
     app, scripts = setup
     monkeypatch.setattr(gui, "_find_embedded_python",
-                        lambda root: pytest.fail("checked Python after the quit"))
+                        lambda root, run: pytest.fail("checked Python after the quit"))
     monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
     app.root.destroy = mock.Mock()
     app._on_finish = mock.Mock()
@@ -554,3 +560,232 @@ def test_after_the_window_closes_setup_lets_the_install_thread_finish_quitting()
     app.run()
     app.root.mainloop.assert_called_once()
     app._worker.join.assert_called_once_with(timeout=gui.QUIT_GRACE)
+
+
+# --------------------------------------------------------------------------
+# real child processes
+# --------------------------------------------------------------------------
+
+# Owned stand-ins: pip with a build it starts, or a quick check of a Python.
+# Each adds to a count in a file of its own every 50 ms until the test's stop
+# file appears or its lifetime ends, so none outlives a test by long whatever
+# happens, and nothing ever has to be killed by name or by number.
+TREE = r'''
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+role, folder, lifetime = sys.argv[1], Path(sys.argv[2]), float(sys.argv[3])
+if role == "pip":
+    # The build writes to pip's output, as a compiler run from a build
+    # backend can, so the pipe setup reads stays open while it runs.
+    subprocess.Popen([sys.executable, __file__, "build", str(folder), str(lifetime)],
+                     stdout=sys.stdout, creationflags=0x08000000 if sys.platform == "win32" else 0)
+    print("Collecting numpy", flush=True)
+count, end = 0, time.monotonic() + lifetime
+while time.monotonic() < end and not (folder.parent / "stop").exists():
+    count += 1
+    (folder / role).write_text(str(count))
+    time.sleep(0.05)
+'''
+
+REAL_FIND_EMBEDDED_PYTHON = gui._find_embedded_python
+
+
+def count(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
+def beating(path: Path, over: float = 0.4) -> bool:
+    """Whether the stand-in that writes path is still running."""
+    before = count(path)
+    time.sleep(over)
+    return count(path) != before
+
+
+def stopped(path: Path, within: float = 3) -> bool:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if not beating(path, 0.3):
+            return True
+    return False
+
+
+@pytest.fixture
+def children(tmp_path, monkeypatch):
+    """Every child setup starts becomes a stand-in from TREE, in a folder of
+    its own, started with the options setup gave it: a pip for a pip install,
+    and a quick check for anything else. The nth runs for lifetimes[n]
+    seconds where that is set, or else for lifetime."""
+    script = tmp_path / "tree.py"
+    script.write_text(TREE, encoding="utf-8")
+    real_popen = subprocess.Popen
+    started = SimpleNamespace(folders=[], lifetime=20.0, lifetimes=[])
+
+    def stand_in(args, **kwargs):
+        folder = Path(tempfile.mkdtemp(dir=tmp_path))
+        n = len(started.folders)
+        started.folders.append(folder)
+        role = "pip" if "install" in args else "probe"
+        lifetime = started.lifetimes[n] if n < len(started.lifetimes) else started.lifetime
+        return real_popen([sys.executable, str(script), role, str(folder), str(lifetime)], **kwargs)
+
+    def wait_for(n, role="build", within=10):
+        """The nth child's folder, once its role has started counting."""
+        deadline = time.monotonic() + within
+        while time.monotonic() < deadline:
+            if len(started.folders) > n and count(started.folders[n] / role):
+                return started.folders[n]
+            time.sleep(0.05)
+        pytest.fail(f"child {n} never started its {role}")
+
+    started.wait_for = wait_for
+    monkeypatch.setattr(gui.subprocess, "Popen", stand_in)
+    yield started
+    (tmp_path / "stop").write_text("")
+    for folder in started.folders:
+        for path in folder.iterdir():
+            stopped(path, within=1)
+
+
+def test_off_windows_a_child_leads_a_session_and_its_group_is_ended(monkeypatch):
+    """Its process group is then everything it starts. Run on every system,
+    with the calls stood in for, since the tests below only reach Windows'
+    job objects on Windows."""
+    signalled = []
+    fake_os = SimpleNamespace(name="posix", killpg=lambda group, sig: signalled.append((group, sig)))
+    monkeypatch.setattr(gui, "os", fake_os)
+    monkeypatch.setattr(gui, "signal", SimpleNamespace(SIGKILL=9))
+    monkeypatch.setattr(gui, "_NO_WINDOW", {})
+    pip = FakePip()
+    monkeypatch.setattr(gui.subprocess, "Popen", pip)
+    child, job = gui._start(["python", "-m", "pip"], stdout=subprocess.PIPE)
+    assert job is None
+    assert pip.kwargs == {"start_new_session": True, "stdout": subprocess.PIPE}
+    gui._end(child, job)
+    assert signalled == [(child.pid, 9)] and not pip.killed.is_set()
+
+    def gone(group, sig):
+        raise ProcessLookupError()
+
+    fake_os.killpg = gone
+    gui._end(child, job)
+    assert pip.killed.is_set(), "with no group left to signal, the child itself is ended"
+
+
+def test_quit_ends_pip_with_the_build_it_started(children, monkeypatch):
+    """Ending only pip left its build running, holding pip's output open, so
+    the install thread also went on waiting for the rest of it."""
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app = window(installing=True)
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, sys.executable)
+    pip = children.wait_for(0)
+    app._close()
+    worker.join(5)
+    assert not worker.is_alive(), "the install thread kept waiting on pip's output"
+    assert isinstance(outcome[0], gui._Quit)
+    assert stopped(pip / "pip") and stopped(pip / "build"), "pip's build kept running"
+    assert app._child is None and app._job is None
+
+
+def test_a_timed_out_pip_is_ended_with_its_build(children, monkeypatch):
+    monkeypatch.setattr(gui, "PIP_TIMEOUT", 2.5)
+    app = window()
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, sys.executable)
+    pip = children.wait_for(0)
+    worker.join(8)
+    assert not worker.is_alive(), "setup kept waiting on the build's copy of pip's output"
+    assert outcome == [False]
+    assert ("  Timed out after 10 minutes.", "err") in app.logged
+    assert stopped(pip / "pip") and stopped(pip / "build"), "pip's build kept running"
+
+
+def test_a_check_that_runs_too_long_is_ended_with_what_it_started(children):
+    """get-pip and the Python checks run this way, with a time limit."""
+    app = window()
+    began = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        app._run_child([sys.executable, "-m", "pip", "install", "pip"], timeout=2.5)
+    assert time.monotonic() - began < 6, "setup waited for the build's copy of the output"
+    pip = children.folders[0]
+    assert stopped(pip / "pip") and stopped(pip / "build")
+    assert app._child is None
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["version check", "pip check"])
+def test_quit_during_a_python_check_ends_it_and_starts_no_other(setup, children, monkeypatch,
+                                                                which):
+    """The checks ran where Quit could not reach them, so the one running went
+    on, and once it passed, the next one started."""
+    app, scripts = setup
+    monkeypatch.setattr(gui, "_find_embedded_python", REAL_FIND_EMBEDDED_PYTHON)
+    exe = gui._embedded_python_exe(app.repo_root)
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"private Python")
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app.root.destroy = mock.Mock()
+    app._on_finish = mock.Mock()
+    app.installing = True
+    # The checks before the one quit during pass at once.
+    children.lifetimes = [0.2] * which + [4]
+    worker, outcome = in_thread(app._run_install)
+    check = children.wait_for(which, "probe")
+    app._close()
+    # Before the install thread is waited on: left alone, the check ends by
+    # itself, 4 seconds in.
+    assert stopped(check / "probe", within=1.5), "the check went on after the quit"
+    worker.join(8)
+    assert outcome == [None], outcome
+    assert len(children.folders) == which + 1, "another check started after the quit"
+    app._on_finish.assert_not_called()
+    assert not (scripts / "Upflow2x.lua").exists()
+
+
+def test_quitting_one_setup_leaves_another_setups_pip_running(children, monkeypatch):
+    """Each child is stopped through its own job or group, never by name."""
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    first, second = window(installing=True), window(installing=True)
+    first._pulse = second._pulse = lambda label: None
+    first_worker, first_outcome = in_thread(first._install_packages, sys.executable)
+    first_pip = children.wait_for(0)
+    second_worker, second_outcome = in_thread(second._install_packages, sys.executable)
+    second_pip = children.wait_for(1)
+    first._close()
+    first_worker.join(5)
+    assert isinstance(first_outcome[0], gui._Quit)
+    assert stopped(first_pip / "pip") and stopped(first_pip / "build")
+    assert beating(second_pip / "pip") and beating(second_pip / "build")
+    second._close()
+    second_worker.join(5)
+    assert isinstance(second_outcome[0], gui._Quit)
+    assert stopped(second_pip / "build")
+
+
+def test_a_full_install_with_real_children_finishes_and_leaves_nothing(setup, children,
+                                                                      monkeypatch):
+    """The checks, and a pip whose build ends on its own, as a normal install."""
+    app, scripts = setup
+    monkeypatch.setattr(gui, "_find_embedded_python", REAL_FIND_EMBEDDED_PYTHON)
+    exe = gui._embedded_python_exe(app.repo_root)
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"private Python")
+    app._setup_embedded_python = lambda: pytest.fail("downloaded Python again")
+    del app._install_packages
+    pulses = []
+    app._pulse = pulses.append
+    children.lifetime = 0.3
+    app._do_install()
+    assert app.install_done
+    assert "Getting numpy..." in pulses
+    conf = dict(line.split("=", 1) for line in
+                (scripts / "Eternal2x.conf").read_text(encoding="utf-8").splitlines())
+    assert Path(conf["python"]) == exe
+    assert app._child is None and app._job is None
+    pip = next(folder for folder in children.folders if (folder / "pip").exists())
+    assert stopped(pip / "build", within=1)
