@@ -258,12 +258,13 @@ def _pip_step(line: str) -> str | None:
     text = line.strip()
     words = text.split()
     if len(words) > 1 and words[0] == "Collecting":
-        return f"Getting {re.split(r'[<>=!~;\[(]', words[1])[0]}..."
+        name = re.split(r"[<>=!~;\[(]", words[1])[0]
+        return f"Getting {name}..."
     if len(words) > 1 and words[0] == "Downloading":
         # A wheel's file name, or its whole URL in older pips, then its size.
         name = words[1].rsplit("/", 1)[-1].split("-")[0]
-        size = text[text.rindex("("):] if text.endswith(")") else ""
-        return f"Downloading {name} {size}".rstrip() + "..."
+        size = re.search(r"\s(\(\d+(?:\.\d+)?\s+[A-Za-z]+\))$", text)
+        return f"Downloading {name}" + (f" {size[1]}" if size else "") + "..."
     if text.startswith("Installing collected packages:"):
         return f"Installing {text.split(':', 1)[1].strip()}..."
     return None

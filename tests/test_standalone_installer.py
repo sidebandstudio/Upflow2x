@@ -184,6 +184,8 @@ def window(**attrs):
     ("Collecting opencv-python>=4.8", "Getting opencv-python..."),
     ("  Downloading opencv_python-4.10.0.84-cp37-abi3-win_amd64.whl (38.8 MB)",
      "Downloading opencv_python (38.8 MB)..."),
+    ("  Downloading https://example.org/numpy-2.1.0.whl?token=unknown)",
+     "Downloading numpy..."),
     ("  Downloading https://files.pythonhosted.org/packages/ab/numpy-2.1.0-cp311-cp311-"
      "macosx_14_0_arm64.whl (5.1 MB)", "Downloading numpy (5.1 MB)..."),
     ("Installing collected packages: numpy, opencv-python",
@@ -432,6 +434,7 @@ def test_quitting_during_pip_ends_pip_and_leaves_nothing_running(monkeypatch):
     assert isinstance(outcome[0], gui._Quit), "the install thread went on after the quit"
     assert not any(tag == "err" for _, tag in app.logged), "it reported to a closed window"
     assert timers[0].daemon, "the timer would keep setup's process alive"
+    timers[0].join(timeout=1)
     assert not timers[0].is_alive()
 
 
