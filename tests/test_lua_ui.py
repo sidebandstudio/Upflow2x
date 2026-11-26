@@ -2421,9 +2421,11 @@ def test_a_finished_run_that_exited_is_not_taken_for_a_crash(lua, direct):
 
 
 def test_starting_a_run_clears_the_last_exit_code(lua, direct):
-    run_file(direct, "exit").write_text("1\n")
+    old_exit = run_file(direct, "exit")
+    old_exit.write_text("1\n")
     H = load(lua, ui_script(direct))
     H.click("SmoothBtn")
+    assert not old_exit.exists()
     assert not run_file(direct, "exit").exists()
 
 
