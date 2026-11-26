@@ -7,8 +7,8 @@
   To redraw it, render this page at 1280x640 and save over the PNG. From this
   folder, with Chrome:
 
-      chrome --headless=new --hide-scrollbars --force-device-scale-factor=1
-             --window-size=1280,640 --virtual-time-budget=3000
+      chrome --headless=new --hide-scrollbars --force-device-scale-factor=1 \
+             --window-size=1280,640 --virtual-time-budget=3000 \
              --screenshot=social-preview.png "file://$PWD/social-preview.html"
 
   Chrome reads a bare file name as a web address, so the page goes in as a
