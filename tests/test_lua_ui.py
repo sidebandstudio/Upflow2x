@@ -1261,6 +1261,8 @@ def test_every_module_the_panel_calls_exists(lua, direct, repo_root):
         module = H.last_command().split("-m ")[1].split()[0]
         assert (repo_root / Path(module.replace(".", "/") + ".py")).exists(), \
             f"{button} calls missing module {module}"
+        # The run ends, so the next panel does not follow it as one still loading.
+        run_file(direct, "exit").write_text("0\n")
 
 
 def test_the_command_the_panel_builds_actually_runs(lua, direct):
@@ -1441,7 +1443,8 @@ def test_reset_clears_a_stuck_run(lua, direct):
     H.click("CancelBtn")
     assert H.enabled("SmoothBtn")
     assert H.widgets["Progress"].Text == ""
-    assert not run_file(direct, "status").exists()
+    # Left empty, which reads as no status, and says its end was dealt with.
+    assert run_file(direct, "status").read_text() == ""
 
 
 def test_refreshing_with_no_run_says_so(lua, direct):
@@ -3227,9 +3230,12 @@ def test_a_run_that_is_really_gone_resets_in_one_press(lua, direct, case):
     # where its render goes if it finishes after all.
     assert H.status() == ("Ready." if exited else GAVE_UP)
     assert H.enabled("SmoothBtn")
-    for kind in ("status", "stop"):
-        assert not run_file(direct, kind).exists(), kind
-    assert not Path(str(run_file(direct, "status")) + ".reset").exists()
+    assert not run_file(direct, "stop").exists()
+    # Nothing is left to read. A run known to have ended keeps an empty
+    # status, which says a panel dealt with its end, so none reports it again.
+    status = run_file(direct, "status")
+    assert (status.read_text() == "") if exited else not status.exists()
+    assert not Path(str(status) + ".reset").exists()
     # The exit code stays, as proof the run ended, so the next run clears its files.
     assert run_file(direct, "exit").exists() == exited
 
@@ -3262,7 +3268,8 @@ def test_reset_clears_an_old_failure_from_a_closed_panel(lua, direct):
     H = load(lua, ui_script(direct))
     H.click("CancelBtn")
     assert H.status() == "Ready."
-    assert not run_file(direct, "status").exists()
+    # Left empty, which reads as no status, and says its end was dealt with.
+    assert run_file(direct, "status").read_text() == ""
 
 
 def publish_after_next_claim(H, root, exited=False, **fields):
@@ -3701,8 +3708,9 @@ def mend_renames(lua):
 @pytest.mark.parametrize("restore", ["works", "fails"])
 def test_a_pointer_that_cannot_be_moved_into_place_leaves_the_run_before_in_charge(
         lua, direct, restore):
-    """B started, but its pointer could not replace A's. Removing A's pointer
-    to make room lost it when the move then failed."""
+    """B's pointer could not replace A's. Removing A's pointer to make room
+    lost it when the move then failed, and B, started first and only asked to
+    stop, could render on with no panel able to find it."""
     H = load(lua, ui_script(direct))
     a = give_up_on_a_quiet_render(H, direct)
     H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
@@ -3711,11 +3719,11 @@ def test_a_pointer_that_cannot_be_moved_into_place_leaves_the_run_before_in_char
     launches = H.command_count()
     H.click("SmoothBtn")
     mend_renames(lua)
-    assert H.command_count() == launches + 1
+    assert H.command_count() == launches, "B started with no pointer to find it by"
     assert "Could not start the run" in H.status()
     assert H.enabled("SmoothBtn")
-    stops = list(direct.glob(".upflow2x_run-*.stop"))
-    assert len(stops) == 1 and a not in stops[0].name, "B was left to run unowned"
+    assert all(p.name.startswith(f".upflow2x_run-{a}.")
+               for p in direct.glob(".upflow2x_run-*")), "B left files behind"
     pointer, old = direct / ".upflow2x_run", direct / ".upflow2x_run.old"
     if restore == "works":
         assert pointer.read_text().strip() == a and not old.exists()
@@ -3733,17 +3741,33 @@ def test_a_pointer_that_cannot_be_moved_into_place_leaves_the_run_before_in_char
 
 def test_a_pointer_waiting_to_go_in_is_named_for_its_run(lua, direct):
     """Two panels shared one waiting pointer, so one could move the other's
-    tag into place while that run was still starting, and that run could then
-    fail, leaving the pointer on a run that never started."""
-    staged = []
+    tag into place. And it went in only after the run started, so a run whose
+    pointer then could not go in rendered with no panel able to find it."""
+    lua.execute("""
+        REAL_RENAME = REAL_RENAME or os.rename
+        local real_rename = REAL_RENAME
+        MOVED = {}
+        os.rename = function(from, to)
+            local name = tostring(from):match("[^/\\\\]+$")
+            if name:find("^%.upflow2x_run%.new%-") then
+                local f = io.open(from, "r")
+                MOVED[#MOVED + 1] = name .. "=" .. (f and f:read("*a") or "")
+                if f then f:close() end
+            end
+            return real_rename(from, to)
+        end""")
+    pointer = direct / ".upflow2x_run"
+    at_start = []
     H = load(lua, ui_script(direct))
-    H.on_execute = lambda cmd: staged.extend(
-        (p.name, p.read_text()) for p in direct.glob(".upflow2x_run.new*"))
-    H.click("SmoothBtn")
+    H.on_execute = lambda cmd: at_start.append(
+        (pointer.read_text() if pointer.exists() else None,
+         sorted(p.name for p in direct.glob(".upflow2x_run.new*"))))
+    press(H, "SmoothBtn")
     H.on_execute = None
+    mend_renames(lua)
     tag = run_tag(direct)
-    assert staged == [(f".upflow2x_run.new-{tag}", tag)]
-    assert not list(direct.glob(".upflow2x_run.new*"))
+    assert at_start == [(tag, [])], "the run started before a panel could find it"
+    assert list(lua.eval("MOVED").values()) == [f".upflow2x_run.new-{tag}={tag}"]
 
 
 def test_a_run_script_that_fails_as_it_closes_starts_nothing(lua, direct):
@@ -4697,3 +4721,209 @@ def test_a_render_that_lands_after_stop_was_sent_has_no_chime(lua, tmp_path, rep
     # The next render is a new one, and rings as any other.
     land_a_render(H, root, import_path="/tmp/next.mp4")
     assert H.imported_count() == 2 and len(chimes(H)) == 1
+
+
+# --------------------------------------------------------------------------
+# PR 30 review: the run the panel owns, across reopen, Reset and launch
+# --------------------------------------------------------------------------
+
+STILL_GOING = "A run started earlier is still going. Its progress shows here."
+
+
+def test_a_run_reopened_before_its_first_heartbeat_is_followed_not_replaced(lua, direct):
+    """Python loads its packages before it writes a status. Opened again
+    then, the panel took the run for gone, and Render started a second run
+    over it, whose pointer hid the first one's result."""
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    a = run_tag(direct)
+    assert not run_file(direct, "status").exists() and not run_file(direct, "exit").exists()
+    H = load(lua, ui_script(direct))
+    assert H.status() == STILL_GOING
+    assert {"CancelBtn", "RefreshStatusBtn"} <= shown(H) and H.text_of("CancelBtn") == "Stop"
+    assert not H.enabled("SmoothBtn"), "a second render could start over the first"
+    write_status(direct, fraction=0.2, updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert "20%" in H.widgets["Progress"].Text
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/a.mp4", updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert H.imported_count() == 1 and H.imported_at(1) == "/tmp/a.mp4"
+    assert run_tag(direct) == a and H.command_count() == 0
+
+
+def test_a_run_reopened_before_its_first_heartbeat_is_followed_only_for_a_while(lua, direct):
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    H = load(lua, ui_script(direct))
+    assert H.status() == STILL_GOING
+    advance_clock(lua, 200)
+    H.fire("PollTimer", "Timeout")
+    assert H.status().startswith("Python has not started after 3 minutes")
+    assert H.text_of("CancelBtn") == "Reset"
+    press(H, "CancelBtn")
+    assert H.status() == GAVE_UP and H.enabled("SmoothBtn")
+
+
+def test_a_run_that_never_reported_is_not_waited_on_once_its_start_is_long_past(lua, direct):
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    a = run_tag(direct)
+    advance_clock(lua, 200)
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW and H.enabled("SmoothBtn")
+    press(H, "SmoothBtn")
+    assert run_tag(direct) not in ("", a) and H.command_count() == 1
+
+
+def test_a_pointer_put_back_after_a_failed_first_launch_leaves_no_pointer(lua, direct):
+    """Before 0.5.2's first run there is no pointer, and so after one that
+    could not start, there is none again."""
+    H = load(lua, ui_script(direct))
+    H.exit_code = 1
+    press(H, "SmoothBtn")
+    H.exit_code = 0
+    assert "Could not start the run" in H.status()
+    assert not (direct / ".upflow2x_run").exists()
+    assert not list(direct.glob(".upflow2x_run*"))
+
+
+@pytest.mark.parametrize("then", ["refresh", "reopen"])
+def test_a_finished_render_reset_could_not_put_back_is_still_brought_in(lua, direct, then):
+    """It finished between Reset's look and its claim. Moving it back from
+    the claim failed, and Refresh Progress, which read only the status's own
+    name, said no run."""
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    H = load(lua, ui_script(direct))
+    assert "CancelBtn" in shown(H) and H.text_of("CancelBtn") == "Reset"
+    finish_during_next_click(H, direct, exited=True, import_path="/tmp/late.mp4")
+    break_renames(lua, "%.reset$")
+    press(H, "CancelBtn")
+    mend_renames(lua)
+    assert H.after_status_read is None, "the render did not finish during Reset"
+    claim = Path(str(run_file(direct, "status")) + ".reset")
+    assert not run_file(direct, "status").exists() and claim.exists()
+    assert "Press Refresh Progress" in H.status() and "RefreshStatusBtn" in shown(H)
+    if then == "reopen":
+        H = load(lua, ui_script(direct))
+        assert "finished while the panel was closed" in H.status()
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1 and H.imported_at(1) == "/tmp/late.mp4"
+    assert not claim.exists() and run_file(direct, "status").read_text() == ""
+    refresh_in_settings(H)
+    assert H.imported_count() == 1
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+    refresh_in_settings(H)
+    assert H.imported_count() == 0
+
+
+@pytest.mark.parametrize("stopped", [True, False])
+def test_a_stop_sent_before_closing_keeps_its_render_silent_when_reopened(
+        lua, tmp_path, repo_root, stopped):
+    """Past its last Stop check, the render landed anyway after the panel had
+    closed. The panel opened next had no word of the Stop, and rang. One no
+    one stopped still rings."""
+    import time
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    on_a_mac(lua)
+    H = load(lua, ui_script(root))
+    press(H, "SmoothBtn")
+    write_status(root, fraction=0.95, updated=time.time())
+    if stopped:
+        press(H, "CancelBtn")
+        press(H, "CancelBtn")
+        assert run_file(root, "stop").exists()
+    write_status(root, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/out.mp4", updated=time.time())
+    H = load(lua, ui_script(root))
+    assert "finished while the panel was closed" in H.status()
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1
+    assert len(chimes(H)) == (0 if stopped else 1), "a render someone stopped rang"
+
+
+def test_a_0_5_1_runs_leftover_claim_is_never_read_as_its_result(lua, direct):
+    """0.5.1 reuses its names and never clears that one, so a finished status
+    left aside long ago could be another run's. A new 0.5.1 crash shows."""
+    import json
+    claim = Path(str(run_file(direct, "status", "")) + ".reset")
+    claim.write_text(json.dumps({"stage": "", "fraction": 1.0, "message": "Rendered.",
+                                 "import_path": "/renders/old_smooth.mp4", "done": True,
+                                 "ok": True, "updated": 0}))
+    run_file(direct, "log", "").write_text("MemoryError\n")
+    run_file(direct, "exit", "").write_text("1\n")
+    H = load(lua, ui_script(direct))
+    assert H.status() == "The last run did not finish. Press Refresh Progress to see why."
+    press(H, "RefreshStatusBtn")
+    assert "MemoryError" in H.status() and H.imported_count() == 0
+
+
+def stall_then_reset_an_analysis(H, root):
+    import time
+    press(H, "SettingsBtn")
+    press(H, "AnalyseBtn")
+    write_status(root, fraction=0.3, updated=time.time() - 10 * 60)
+    press(H, "RefreshStatusBtn")
+    assert H.text_of("CancelBtn") == "Reset"
+    press(H, "CancelBtn")
+    assert H.status() == "Ready."
+
+
+def test_an_analysis_that_reports_again_after_reset_still_marks_its_clip(lua, direct):
+    """Followed again by Refresh Progress, its result was taken for a render's,
+    and its drawings were never marked."""
+    import time
+    H = load(lua, ui_script(direct))
+    stall_then_reset_an_analysis(H, direct)
+    write_status(direct, fraction=0.6, updated=time.time())
+    press(H, "RefreshStatusBtn")
+    assert H.status() == REPORTING and H.text_of("CancelBtn") == "Stop"
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Animated on 2s.",
+                 marks="0,2", updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert H.tagged_markers() == 2
+    assert H.status() == "Check the markers, then press Render."
+
+
+def test_a_run_from_an_earlier_panel_that_reports_again_marks_no_clip(lua, direct):
+    """Nothing says which clip it was, so the clip under the playhead is left alone."""
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SettingsBtn")
+    press(H, "AnalyseBtn")
+    write_status(direct, fraction=0.3, updated=time.time() - 10 * 60)
+    H = load(lua, ui_script(direct))
+    assert H.text_of("CancelBtn") == "Reset"
+    write_status(direct, fraction=0.6, updated=time.time())
+    press(H, "RefreshStatusBtn")
+    assert H.status() == REPORTING
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Animated on 2s.",
+                 marks="0,2", updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert H.tagged_markers() == 0 and H.imported_count() == 0
+
+
+@pytest.mark.parametrize("left", ["exit only", "progress, then exit"])
+def test_a_run_reset_after_it_ended_is_not_reported_again_when_reopened(lua, direct, left):
+    """Stop, pressed once on a run that had already exited 1, said Ready, but
+    left nothing to say so, and the next panel reported the same failure."""
+    import time
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    if left == "progress, then exit":
+        write_status(direct, fraction=0.5, updated=time.time())
+    run_file(direct, "log").write_text("MemoryError\n")
+    run_file(direct, "exit").write_text("1\n")
+    assert H.text_of("CancelBtn") == "Stop"
+    press(H, "CancelBtn")
+    assert H.status() == "Ready."
+    H = load(lua, ui_script(direct))
+    assert shown(H) == MAIN_VIEW
+    refresh_in_settings(H)
+    assert H.status() == "No run in progress." and "FolderBtn" not in shown(H)
+    assert run_file(direct, "exit").exists(), "the proof the run ended went"

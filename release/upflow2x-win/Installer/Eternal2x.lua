@@ -231,6 +231,7 @@ local REVEAL_SCRIPT = join_path(RUN_DIR, ".eternal2x_reveal.cmd")
 --           a Windows command line
 --   script  the command a run starts from on Windows
 --   log     everything the run printed
+--   reset   where Reset moves the status to read it, see claim_status
 --   seen    no longer written or read. An earlier build of 0.5.2 noted here
 --           that a panel had shown how the run ended. Named, so it goes with
 --           the run's other files. The status, left empty, says it now
@@ -244,12 +245,13 @@ local function run_files(tag)
         names = { status = ".eternal2x_status.json", tmp = ".eternal2x_status.tmp",
                   stop = ".eternal2x_status.stop", exit = ".eternal2x_exit",
                   marks = ".eternal2x_marks.txt", script = ".eternal2x_run.cmd",
-                  log = ".upflow2x_last_run.log", seen = ".upflow2x_last_run.seen" }
+                  log = ".upflow2x_last_run.log", seen = ".upflow2x_last_run.seen",
+                  reset = ".eternal2x_status.json.reset" }
     else
         local base = ".upflow2x_run-" .. tag
         names = { status = base .. ".json", tmp = base .. ".tmp", stop = base .. ".stop",
                   exit = base .. ".exit", marks = base .. ".marks", script = base .. ".cmd",
-                  log = base .. ".log", seen = base .. ".seen" }
+                  log = base .. ".log", seen = base .. ".seen", reset = base .. ".json.reset" }
     end
     for kind, name in pairs(names) do names[kind] = join_path(RUN_DIR, name) end
     return names
@@ -862,8 +864,21 @@ local function read_status_at(path)
     return parse_status(s)
 end
 
+-- Reset reads a status by moving it aside. If moving it back fails, it is
+-- read from there while the status itself is missing, until the run is dealt
+-- with. Not for a run from before 0.5.2: 0.5.1 reuses its names and never
+-- clears that one, so it could be an older run's. Returns what it holds.
+local function claimed()
+    if RUN_TAG == "" or exists(STATUS_PATH) then return nil end
+    return read_file(STATUS_PATH .. ".reset")
+end
+
 local function read_status()
-    return read_status_at(STATUS_PATH)
+    local st = read_status_at(STATUS_PATH)
+    if st then return st end
+    -- Only a finished one: Reset deletes a claim of a run still going.
+    local kept = parse_status(claimed() or "")
+    return kept and kept.done and kept or nil
 end
 
 -- The exit code of the last background run, or nil while it is still going.
@@ -1984,11 +1999,13 @@ end
 local function mark_seen()
     local f = io.open(STATUS_PATH, "w")
     if f then f:close() end
+    -- A claim Reset could not move back is dealt with too.
+    os.remove(STATUS_PATH .. ".reset")
 end
 
 -- Whether a panel has shown how the run the panel owns ended.
 local function end_shown()
-    return read_file(STATUS_PATH) == ""
+    return read_file(STATUS_PATH) == "" or claimed() == ""
 end
 
 -- With quiet, as when Stop or Reset finds the run finished, a render that
@@ -2060,8 +2077,13 @@ local function apply_status(st, quiet)
                 if hint then set_meta(hint) end
                 -- Only once it is on the timeline, and once, since the
                 -- status is emptied above and nothing imports it again. Not
-                -- for a run someone asked to stop, which finished anyway.
-                if landed and not quiet and not view.stop_sent then chime() end
+                -- for a run someone asked to stop, which finished anyway. A
+                -- render past its last Stop check leaves the stop file in
+                -- place as it lands, so a Stop sent from an earlier panel
+                -- counts too.
+                if landed and not quiet and not view.stop_sent and not exists(STOP_PATH) then
+                    chime()
+                end
             elseif where then
                 -- The status box fits three lines, too few for a path as well.
                 set_meta(short_path(where, 68))
@@ -2084,16 +2106,29 @@ end
 -- report it, as when its window is closed.
 local STALLED_AFTER = 180
 
--- The run the panel owns reports again, after a stall this panel saw, or as
--- one it found quiet when it opened or Reset gave up on. It is followed as
--- a run going, with Stop and its progress, and what was said while it was
--- quiet goes. The timer, started as the panel opened, reads it from here on.
-local function follow_again(st)
+-- When the run the panel owns started: its tag begins with the time. nil for
+-- a run from before 0.5.2, whose names do not say.
+local function started_at()
+    local t = RUN_TAG:match("^(%d+)%-")
+    return t and tonumber(t)
+end
+
+-- The run the panel owns is followed again: it reports again after a stall
+-- this panel saw, or it is one an earlier panel left going, found quiet as
+-- the panel opened, or Reset gave up on. It is followed as a run going, with
+-- Stop and its progress, and what was said while it was quiet goes. An
+-- analysis this panel started marks its clip when it ends, as one followed
+-- from the start does. Nothing says which clip a run from an earlier panel
+-- was, so it marks none. The timer, started as the panel opened, reads it
+-- from here on. `said` is what the status says, by default that it reports.
+local function follow_again(st, said)
     view.recover = nil
-    LAUNCHED_AT = st and st.updated or LAUNCHED_AT
+    -- Its heartbeat counts until it writes again, or before its first, its start.
+    LAUNCHED_AT = (st and st.updated) or LAUNCHED_AT or started_at()
+    ANALYSING = RUN_KIND == "analysis"
     set_busy(true)
     if st then set_progress(st.fraction, st.stage) end
-    set_status("The run is reporting again. Its progress shows here.")
+    set_status(said or "The run is reporting again. Its progress shows here.")
 end
 
 local function poll()
@@ -2145,32 +2180,27 @@ local function poll()
     return true
 end
 
--- A run may still be going, even one started from an earlier panel. Python
--- writes its status at least once a frame, so a recent unfinished one means
--- it is. Only one run at a time, since runs share the script, status and
--- exit files.
-local function run_in_progress()
-    if read_exit_code() then return false end
-    local st = read_status()
-    if st and st.done then return false end
-    local last = (st and st.updated) or (RUNNING and LAUNCHED_AT)
-    -- Either way of the clock: a heartbeat from before the clock was moved
-    -- back is in the future, and is no more alive than an old one.
-    return last and math.abs(os.time() - last) < STALLED_AFTER or false
-end
-
--- One look at the run for a press of Stop or Reset: the exit code, then the
--- status, each read once. Python writes its last status before it exits and
--- the shell then writes the exit code, so a status read after the exit code
--- is final. "finished" is a run with its result, "live" a run Stop can end,
--- and "gone" one that died or went quiet, or no run at all. The status and
--- exit code read come back with it.
+-- One look at the run the panel owns, even one started from an earlier
+-- panel: the exit code, then the status, each read once. Python writes its
+-- last status before it exits and the shell then writes the exit code, so a
+-- status read after the exit code is final. "finished" is a run with its
+-- result, "live" a run Stop can end, and "gone" one that died or went quiet,
+-- or no run at all. The status and exit code read come back with it.
 local function look()
     local exited = read_exit_code()
     local st = read_status()
     if st and st.done then return "finished", st, exited end
     if exited then return "gone", st, exited end
+    -- Python writes its status at least once a frame, so a recent unfinished
+    -- one is a run going. Its first comes only once it has loaded its
+    -- packages, which can take a while, so until then a run counts from its
+    -- start, and a panel opened meanwhile follows it rather than starting
+    -- another over it. Only while it has written no status: an empty one is a
+    -- run whose end a panel showed.
     local last = (st and st.updated) or (RUNNING and LAUNCHED_AT)
+        or (not st and not exists(STATUS_PATH) and started_at())
+    -- Either way of the clock: a heartbeat from before the clock was moved
+    -- back is in the future, and is no more alive than an old one.
     if last and math.abs(os.time() - last) < STALLED_AFTER then return "live", st, exited end
     return "gone", st, exited
 end
@@ -2271,9 +2301,16 @@ end
 -- finish just after the look, so the status is moved aside in one step and
 -- read there, never deleted unread. A finished one goes back in place for the
 -- caller to handle, and a status written after the move is a new file Reset
--- leaves.
+-- leaves. If moving it back fails, it stays aside, where read_status finds
+-- it, so a finished one is still the run's result.
 local function claim_status()
     local aside = STATUS_PATH .. ".reset"
+    -- One kept aside from an earlier claim comes first, and is never deleted.
+    local kept = parse_status(claimed() or "")
+    if kept and kept.done then
+        os.rename(aside, STATUS_PATH)
+        return kept
+    end
     os.remove(aside)
     if not os.rename(STATUS_PATH, aside) then return nil end
     local st = read_status_at(aside)
@@ -2299,19 +2336,17 @@ local function last_run_first()
         if settle(st) then return true, ended end
         -- Nothing worth keeping, and a finished run writes nothing more.
         os.remove(STATUS_PATH)
+        os.remove(STATUS_PATH .. ".reset")
         return false, ended
     end
     -- Render and Analyse can only be pressed while no run is being followed,
-    -- so a live one here is one Reset gave up on, writing again.
+    -- so a live one here is one Reset gave up on, writing again. One still
+    -- loading, before its first status, is followed from the moment the panel
+    -- opens, which keeps them unpressable.
     if state ~= "live" or not st then return false, ended end
-    -- Still going, so it is followed rather than replaced. Its heartbeat
-    -- counts until it writes again, as a launch does.
-    LAUNCHED_AT = st.updated
-    ANALYSING = RUN_KIND == "analysis"
-    set_busy(true)
-    set_progress(st.fraction, st.stage)
+    -- Still going, so it is followed rather than replaced.
+    follow_again(st, "A run started earlier is still going. Its progress shows here.")
     start_polling()
-    set_status("A run started earlier is still going. Its progress shows here.")
     return true, ended
 end
 
@@ -2338,14 +2373,15 @@ local function commit_pointer(new)
 end
 
 -- Starts a run with files of its own, `marks` among them, and makes it the
--- run the panel owns, the one the pointer names. Until it is on its way,
--- nothing of the last run changes, so if it cannot start, a run Reset gave up
--- on that finishes after all is still found. The new pointer is written
--- before the run starts, since a run a panel opened later could not find
--- should not start, and goes into place once it has. Then the last run's
--- files go when `ended`, the look before it, showed that run had ended. One
--- that may still be going keeps them, and they are the only files it can
--- write to. Returns whether the run started, and if not, why.
+-- run the panel owns, the one the pointer names. The pointer goes in before
+-- the run starts, so a run that starts is always one a panel opened later can
+-- find: if it cannot go in, nothing starts. If the run then cannot start, the
+-- last run's pointer goes back, so a run Reset gave up on that finishes after
+-- all is still found. Nothing else of the last run changes until the new one
+-- is on its way. Then the last run's files go when `ended`, the look before
+-- it, showed that run had ended. One that may still be going keeps them, and
+-- they are the only files it can write to. Returns whether the run started,
+-- and if not, why.
 local function launch(ended, extra, marks)
     local last = RUN_TAG
     local tag
@@ -2355,42 +2391,44 @@ local function launch(ended, extra, marks)
                             ((tostring({}):gsub("%W", "")):sub(-6)))
     until not (exists(run_files(tag).status) or exists(run_files(tag).exit))
     local files = run_files(tag)
+    -- `name` written whole with `body`, or nil. A write can look fine and
+    -- still fail as the file closes.
+    local function written(name, body)
+        local f = io.open(name, "w")
+        local wrote = f and f:write(body)
+        local closed = f and f:close()
+        if wrote and closed then return name end
+        os.remove(name)
+        return nil
+    end
     -- Named for the run, so another panel starting one at the same time
     -- never puts its tag in this one's place.
-    local new = RUN_POINTER .. ".new-" .. tag
-    -- A write can look fine and still fail as the file closes.
-    local f = io.open(new, "w")
-    local wrote = f and f:write(tag)
-    local closed = f and f:close()
-    if not (wrote and closed) then
-        os.remove(new)
-        return false, CANNOT_START
-    end
+    local new = written(RUN_POINTER .. ".new-" .. tag, tag)
+    if not new then return false, CANNOT_START end
     if marks and #marks > 0 then
-        f = io.open(files.marks, "w")
-        wrote = f and f:write(table.concat(marks, ","))
-        closed = f and f:close()
-        if not (wrote and closed) then
+        if not written(files.marks, table.concat(marks, ",")) then
             os.remove(new)
-            os.remove(files.marks)
             return false, "Could not write the marked frames to " .. files.marks .. "."
         end
         extra = extra .. " --marks-file " .. shell_quote(files.marks)
     end
-    use_run(tag)
-    if not run_background("Stages.resolve_smooth", current_args(extra)) then
-        use_run(last)
+    if not commit_pointer(new) then
         os.remove(new)
-        for _, path in pairs(files) do os.remove(path) end
+        os.remove(files.marks)
         return false, CANNOT_START
     end
-    if not commit_pointer(new) then
-        -- Going, but a panel opened later could not find it, so it ends at
-        -- its first frame and the last run stays the one the panel owns.
-        f = io.open(files.stop, "w")
-        if f then f:close() end
+    use_run(tag)
+    if not run_background("Stages.resolve_smooth", current_args(extra)) then
+        -- It never started, so the last run is the one the panel owns again,
+        -- here and in the pointer. Before 0.5.2's first run there was none.
         use_run(last)
-        os.remove(new)
+        if last == "" then
+            os.remove(RUN_POINTER)
+        else
+            local back = written(RUN_POINTER .. ".back-" .. tag, last)
+            if back and not commit_pointer(back) then os.remove(back) end
+        end
+        for _, path in pairs(files) do os.remove(path) end
         return false, CANNOT_START
     end
     if ended then
@@ -2639,14 +2677,14 @@ function win.On.CancelBtn.Clicked(ev)
     local giving_up = state == "gone" and not exited and (st ~= nil or RUNNING)
         and RUN_KIND ~= "analysis"
     if state == "gone" then st = claim_status() end
-    if st and st.done then
-        -- Found finished by a press of Stop or Reset: it lands with no sound.
-        if settle(st, true) then return end
-        -- Nothing worth keeping, and a finished run writes nothing more.
-        os.remove(STATUS_PATH)
-    end
+    -- Found finished by a press of Stop or Reset: it lands with no sound.
+    if st and st.done and settle(st, true) then return end
     -- The exit code stays: it shows the run has ended, so the next run can
-    -- clear its files.
+    -- clear its files. A run known to have ended, by its exit code or by a
+    -- result with nothing to keep, is marked as one whose end a panel dealt
+    -- with, so a panel opened later does not report it again. One that only
+    -- went quiet is not, as it may still finish, or fail and say why.
+    if exited or (st and st.done) then mark_seen() end
     os.remove(STOP_PATH)
     -- A run given up on can still finish, so Refresh Progress stays to look.
     view.recover = giving_up and "gave_up" or nil
@@ -2734,8 +2772,9 @@ local function run_update(auto_mode)
         if not auto_mode then set_status(launch_problem()) end
         return
     end
-    -- An update replaces the files a running render is using.
-    if run_in_progress() then
+    -- An update replaces the files a running render is using, or one still
+    -- loading them.
+    if (look()) == "live" then
         if not auto_mode then
             set_status("A render is still running. Check for updates once it finishes.")
         end
@@ -2782,10 +2821,9 @@ else
     local state, waiting, exited = look()
     local failed = exited ~= nil and exited ~= "0"
     if state == "live" then
-        -- Closed mid-run and reopened: follow that run, and import it when done.
-        set_busy(true)
-        start_polling()
-        set_status("A run started earlier is still going. Its progress shows here.")
+        -- Closed mid-run and reopened: follow that run, and import it when
+        -- done, even one still loading before its first status.
+        follow_again(waiting, "A run started earlier is still going. Its progress shows here.")
     elseif state == "finished" and waiting.ok and waiting.import_path ~= "" then
         -- It finished after its panel closed, so nothing has imported it, and
         -- the next run would delete its status unseen.
