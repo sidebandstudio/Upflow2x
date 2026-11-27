@@ -14,6 +14,7 @@ import collections
 import io
 import os
 import platform
+import queue
 import re
 import shutil
 import signal
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -123,36 +125,46 @@ if os.name == "nt":
     _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
     _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    # A child starts suspended until it is in its job, so it can start
+    # nothing outside it. NtResumeProcess resumes it whole. It is missing
+    # from Windows' published API but has been in ntdll since XP, and psutil
+    # resumes processes with it.
+    _ntdll = ctypes.WinDLL("ntdll")
+    _ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+    _ntdll.NtResumeProcess.restype = ctypes.c_long
+    _CREATE_SUSPENDED = 0x4
 
 
 def _start(args: list[str], **kwargs) -> tuple[subprocess.Popen, int | None]:
     """Start a child that _end can stop with every process it starts. Returns
-    it and, on Windows, its job object, or None where Windows refused one."""
+    it and, on Windows, its job object. Where Windows refuses the job, the
+    child is ended before it has run, and OSError says so."""
     if os.name != "nt":
         return subprocess.Popen(args, start_new_session=True, **kwargs, **_NO_WINDOW), None
-    child = subprocess.Popen(args, **kwargs, **_NO_WINDOW)
-    # It joins the job just after it starts, which is long before pip can
-    # have started a build.
+    child = subprocess.Popen(args, **kwargs,
+                             creationflags=_NO_WINDOW["creationflags"] | _CREATE_SUSPENDED)
     job = _kernel32.CreateJobObjectW(None, None)
     # Closing the last handle to the job ends whatever is left in it, so
     # setup exiting, however it exits, leaves nothing running.
     limits = _JobLimits(flags=0x2000)  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-    if job and not (_kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits),
-                                                      ctypes.sizeof(limits))
-                    and _kernel32.AssignProcessToJobObject(job, child._handle)):
-        _kernel32.CloseHandle(job)
-        job = None
-    return child, job
+    if (job and _kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits),
+                                                  ctypes.sizeof(limits))
+            and _kernel32.AssignProcessToJobObject(job, child._handle)
+            and _ntdll.NtResumeProcess(child._handle) == 0):
+        return child, job
+    error = ctypes.get_last_error()
+    child.kill()
+    child.wait()
+    _close_job(job)
+    raise OSError("Windows would not let setup keep track of the processes it starts "
+                  f"(error {error}).")
 
 
 def _end(child: subprocess.Popen, job: int | None) -> None:
-    """Stop child and every process it started. Their copies of its output
-    pipe close with them, so a read of it ends too."""
+    """Stop child and what it started: its job on Windows, its process group
+    elsewhere. Their copies of its output pipe close with them."""
     if job:
         _kernel32.TerminateJobObject(job, 1)
-    elif os.name == "nt":
-        # Without a job only the child itself can be ended.
-        child.kill()
     else:
         try:
             os.killpg(child.pid, signal.SIGKILL)
@@ -309,6 +321,10 @@ def _download_with_progress(url: str, callback=None) -> bytes:
 
 # How long pip may take over the packages before setup gives up on it.
 PIP_TIMEOUT = 600
+
+# How long setup goes on reading pip's output after pip has ended. Something
+# pip started outside its process group can keep the output open for good.
+OUTPUT_GRACE = 2
 
 # How long setup waits, once its window has closed, for the install thread to
 # end a child process that was still starting when Quit was pressed.
@@ -647,7 +663,9 @@ class InstallerApp:
             stdout, stderr = child.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             self._stop(child)
-            child.communicate()
+            # The child only. What it started outside its process group can
+            # keep its output open for good.
+            child.wait()
             raise
         finally:
             self._release(child)
@@ -820,34 +838,59 @@ class InstallerApp:
             proc = self._launch(pip_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, errors="replace",
                                 env={**os.environ, "PYTHONUNBUFFERED": "1"})
-        except OSError:
-            self.root.after(0, self._log, "  Could not run pip.", "err")
+        except OSError as exc:
+            self.root.after(0, self._log, f"  Could not run pip: {exc}", "err")
             return False
 
-        timed_out = threading.Event()
+        # Read on a thread of its own, so setup can stop waiting on output
+        # something pip started keeps open. A daemon, so it never keeps setup
+        # running after its window closes.
+        output: queue.Queue = queue.Queue()
 
-        def give_up():
-            timed_out.set()
-            self._stop(proc)
-
-        timer = threading.Timer(PIP_TIMEOUT, give_up)
-        # A daemon, so it never keeps setup running after its window closes.
-        timer.daemon = True
-        timer.start()
-        tail = collections.deque(maxlen=50)
-        try:
+        def read():
             for line in proc.stdout:
-                tail.append(line.rstrip())
-                step = _pip_step(line)
-                if step:
-                    self.root.after(0, self._pulse, step)
-            proc.wait()
+                output.put(line)
+            output.put(None)
+
+        threading.Thread(target=read, daemon=True).start()
+        deadline = time.monotonic() + PIP_TIMEOUT
+        tail = collections.deque(maxlen=50)
+        timed_out = drained = False
+        ended = None
+        try:
+            while True:
+                try:
+                    line = output.get(timeout=0.2)
+                except queue.Empty:
+                    line = ""
+                if line is None:
+                    drained = True
+                elif line:
+                    tail.append(line.rstrip())
+                    step = _pip_step(line)
+                    if step:
+                        self.root.after(0, self._pulse, step)
+                if proc.poll() is None:
+                    # Only a pip still running at the deadline has timed out.
+                    if not timed_out and time.monotonic() > deadline:
+                        timed_out = True
+                        self._stop(proc)
+                    continue
+                if drained:
+                    break
+                if ended is None:
+                    ended = time.monotonic()
+                if time.monotonic() - ended > OUTPUT_GRACE:
+                    break
         finally:
-            timer.cancel()
             self._release(proc)
         self._check_quit()
-        if timed_out.is_set():
+        # A pip that exited 0 as the deadline came has finished.
+        if timed_out and proc.returncode != 0:
             self.root.after(0, self._log, "  Timed out after 10 minutes.", "err")
+            if not drained:
+                self.root.after(0, self._log, "  Something pip started is still running.",
+                                "err")
             return False
         if proc.returncode != 0:
             # pip's ERROR lines come last and say what went wrong. The first

@@ -547,8 +547,11 @@ def test_the_gui_installer_opens_no_console_windows():
              and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"
              and node.func.attr != "CompletedProcess"]
     assert calls
+    # Either **_NO_WINDOW, or flags of its own built from it, as for a child
+    # that starts suspended.
     for call in calls:
         assert any(kw.arg is None and getattr(kw.value, "id", "") == "_NO_WINDOW"
+                   or kw.arg == "creationflags" and "_NO_WINDOW" in ast.unparse(kw.value)
                    for kw in call.keywords), f"line {call.lineno} would open a console"
 
 

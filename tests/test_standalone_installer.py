@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -200,17 +201,13 @@ def test_the_label_follows_pip_from_package_to_package(line, step):
 
 class FakePip:
     """pip as Popen sees it: its lines, then its exit code. With hang it runs
-    until killed, with times_out a wait given a timeout runs out, and with a
-    gate Popen does not return until the gate opens."""
+    until killed, with times_out a wait given a timeout runs out, with a gate
+    Popen does not return until the gate opens, and with held something pip
+    started keeps its output open, after pip has ended, until held is set."""
 
-    # No process behind it. No process group has this number, which is above
-    # every system's limit on process IDs, and a null handle joins no job.
-    pid = 2 ** 30
-    _handle = None
-
-    def __init__(self, lines=(), code=0, hang=False, times_out=False, gate=None):
+    def __init__(self, lines=(), code=0, hang=False, times_out=False, gate=None, held=None):
         self.lines, self.code, self.hang = lines, code, hang
-        self.times_out, self.gate = times_out, gate
+        self.times_out, self.gate, self.held = times_out, gate, held
         self.returncode = None
         self.killed = threading.Event()
         self.starting = threading.Event()
@@ -230,22 +227,54 @@ class FakePip:
         yield from (line + "\n" for line in self.lines)
         if self.hang:
             assert self.killed.wait(5), "setup never gave up on pip"
+        self.returncode = self.code
+        if self.held is not None:
+            self.held.wait(10)
 
     def communicate(self, timeout=None):
         if self.times_out and timeout is not None and not self.killed.is_set():
             raise subprocess.TimeoutExpired(self.args, timeout)
         if self.hang:
             assert self.killed.wait(5), "setup never gave up on pip"
+        if self.held is not None:
+            self.held.wait(10)
         self.returncode = self.code
         return "".join(line + "\n" for line in self.lines), ""
 
+    def poll(self):
+        return self.returncode
+
     def kill(self):
         self.killed.set()
-        self.code = -9
+        # A process that has ended keeps the exit code it ended with.
+        if self.returncode is None:
+            self.code = -9
 
     def wait(self):
         self.returncode = self.code
         return self.code
+
+
+REAL_START, REAL_END = gui._start, gui._end
+
+
+@pytest.fixture(autouse=True)
+def fakes_have_no_job(monkeypatch):
+    """A FakePip has no process to put in a job or a process group, so it
+    starts as it is and ends when killed. Real children go the real way."""
+    def start(args, **kwargs):
+        if isinstance(gui.subprocess.Popen, FakePip):
+            return gui.subprocess.Popen(args, **kwargs), None
+        return REAL_START(args, **kwargs)
+
+    def end(child, job):
+        if isinstance(child, FakePip):
+            child.kill()
+        else:
+            REAL_END(child, job)
+
+    monkeypatch.setattr(gui, "_start", start)
+    monkeypatch.setattr(gui, "_end", end)
 
 
 def in_thread(call, *args):
@@ -411,25 +440,16 @@ def test_install_does_nothing_while_running_or_once_done(monkeypatch, state):
 def test_quitting_during_pip_ends_pip_and_leaves_nothing_running(monkeypatch):
     """A confirmed quit left pip installing with no window, and pip's timer,
     not a daemon, kept setup's process alive for up to 10 minutes."""
-    import time
     pip = FakePip(["Collecting numpy"], hang=True)
     monkeypatch.setattr(gui.subprocess, "Popen", pip)
     monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
-    timers = []
-    real_timer = threading.Timer
-
-    def spy(*args, **kwargs):
-        timers.append(real_timer(*args, **kwargs))
-        return timers[-1]
-
-    monkeypatch.setattr(gui.threading, "Timer", spy)
+    before = set(threading.enumerate())
     app = window(installing=True)
     app._pulse = lambda label: None
     worker, outcome = in_thread(app._install_packages, "python")
     try:
-        deadline = time.monotonic() + 5
-        while not timers and time.monotonic() < deadline:
-            time.sleep(0.01)
+        assert pip.starting.wait(5)
+        time.sleep(0.2)
         app._close()
         app.root.destroy.assert_called_once()
         assert pip.killed.wait(2), "pip kept running after setup quit"
@@ -439,9 +459,9 @@ def test_quitting_during_pip_ends_pip_and_leaves_nothing_running(monkeypatch):
     assert not worker.is_alive()
     assert isinstance(outcome[0], gui._Quit), "the install thread went on after the quit"
     assert not any(tag == "err" for _, tag in app.logged), "it reported to a closed window"
-    assert timers[0].daemon, "the timer would keep setup's process alive"
-    timers[0].join(timeout=1)
-    assert not timers[0].is_alive()
+    lasting = [thread for thread in set(threading.enumerate()) - before
+               if not thread.daemon and thread.is_alive()]
+    assert not lasting, "a thread would keep setup's process alive"
 
 
 def test_quit_before_pip_starts_starts_nothing(monkeypatch):
@@ -571,6 +591,7 @@ def test_after_the_window_closes_setup_lets_the_install_thread_finish_quitting()
 # file appears or its lifetime ends, so none outlives a test by long whatever
 # happens, and nothing ever has to be killed by name or by number.
 TREE = r'''
+import os
 import subprocess
 import sys
 import time
@@ -580,9 +601,12 @@ role, folder, lifetime = sys.argv[1], Path(sys.argv[2]), float(sys.argv[3])
 if role == "pip":
     # The build writes to pip's output, as a compiler run from a build
     # backend can, so the pipe setup reads stays open while it runs.
-    subprocess.Popen([sys.executable, __file__, "build", str(folder), str(lifetime)],
+    subprocess.Popen([sys.executable, __file__, "build", str(folder), str(lifetime), *sys.argv[4:]],
                      stdout=sys.stdout, creationflags=0x08000000 if sys.platform == "win32" else 0)
     print("Collecting numpy", flush=True)
+elif sys.argv[4:] == ["apart"]:
+    # A process group of its own, which ending pip's group does not reach.
+    os.setpgid(0, 0)
 count, end = 0, time.monotonic() + lifetime
 while time.monotonic() < end and not (folder.parent / "stop").exists():
     count += 1
@@ -620,11 +644,12 @@ def children(tmp_path, monkeypatch):
     """Every child setup starts becomes a stand-in from TREE, in a folder of
     its own, started with the options setup gave it: a pip for a pip install,
     and a quick check for anything else. The nth runs for lifetimes[n]
-    seconds where that is set, or else for lifetime."""
+    seconds where that is set, or else for lifetime. With apart, pip's build
+    leaves pip's process group."""
     script = tmp_path / "tree.py"
     script.write_text(TREE, encoding="utf-8")
     real_popen = subprocess.Popen
-    started = SimpleNamespace(folders=[], lifetime=20.0, lifetimes=[])
+    started = SimpleNamespace(folders=[], lifetime=20.0, lifetimes=[], apart=False)
 
     def stand_in(args, **kwargs):
         folder = Path(tempfile.mkdtemp(dir=tmp_path))
@@ -632,7 +657,9 @@ def children(tmp_path, monkeypatch):
         started.folders.append(folder)
         role = "pip" if "install" in args else "probe"
         lifetime = started.lifetimes[n] if n < len(started.lifetimes) else started.lifetime
-        return real_popen([sys.executable, str(script), role, str(folder), str(lifetime)], **kwargs)
+        apart = ["apart"] if started.apart else []
+        return real_popen([sys.executable, str(script), role, str(folder), str(lifetime), *apart],
+                          **kwargs)
 
     def wait_for(n, role="build", within=10):
         """The nth child's folder, once its role has started counting."""
@@ -662,18 +689,19 @@ def test_off_windows_a_child_leads_a_session_and_its_group_is_ended(monkeypatch)
     monkeypatch.setattr(gui, "signal", SimpleNamespace(SIGKILL=9))
     monkeypatch.setattr(gui, "_NO_WINDOW", {})
     pip = FakePip()
+    pip.pid = 4242
     monkeypatch.setattr(gui.subprocess, "Popen", pip)
-    child, job = gui._start(["python", "-m", "pip"], stdout=subprocess.PIPE)
+    child, job = REAL_START(["python", "-m", "pip"], stdout=subprocess.PIPE)
     assert job is None
     assert pip.kwargs == {"start_new_session": True, "stdout": subprocess.PIPE}
-    gui._end(child, job)
+    REAL_END(child, job)
     assert signalled == [(child.pid, 9)] and not pip.killed.is_set()
 
     def gone(group, sig):
         raise ProcessLookupError()
 
     fake_os.killpg = gone
-    gui._end(child, job)
+    REAL_END(child, job)
     assert pip.killed.is_set(), "with no group left to signal, the child itself is ended"
 
 
@@ -789,3 +817,157 @@ def test_a_full_install_with_real_children_finishes_and_leaves_nothing(setup, ch
     assert app._child is None and app._job is None
     pip = next(folder for folder in children.folders if (folder / "pip").exists())
     assert stopped(pip / "build", within=1)
+
+
+# --------------------------------------------------------------------------
+# output that something pip started keeps open
+# --------------------------------------------------------------------------
+
+def test_output_held_open_past_the_deadline_cannot_hold_setup(monkeypatch):
+    """Something pip started outside its group or job could keep pip's output
+    open after pip was ended, and setup read on, past its own deadline."""
+    held = threading.Event()
+    pip = FakePip(["Collecting numpy"], hang=True, held=held)
+    monkeypatch.setattr(gui.subprocess, "Popen", pip)
+    monkeypatch.setattr(gui, "PIP_TIMEOUT", 0.3)
+    monkeypatch.setattr(gui, "OUTPUT_GRACE", 0.5, raising=False)
+    app = window()
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, "python")
+    try:
+        worker.join(5)
+        assert not worker.is_alive(), "setup read on past its deadline"
+    finally:
+        held.set()
+    assert outcome == [False] and pip.killed.is_set()
+    assert [msg for msg, tag in app.logged if tag == "err"] == [
+        "  Timed out after 10 minutes.", "  Something pip started is still running."]
+
+
+def test_a_pip_that_finished_is_not_held_by_output_left_open(monkeypatch):
+    held = threading.Event()
+    monkeypatch.setattr(gui.subprocess, "Popen", FakePip(PIP_OUTPUT, held=held))
+    monkeypatch.setattr(gui, "OUTPUT_GRACE", 0.5, raising=False)
+    app = window()
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, "python")
+    try:
+        worker.join(5)
+        assert not worker.is_alive(), "setup waited on output after pip had finished"
+    finally:
+        held.set()
+    assert outcome == [True]
+    assert not any(tag == "err" for _, tag in app.logged)
+
+
+def test_a_check_past_its_time_limit_is_not_held_by_its_output(monkeypatch):
+    """After the limit, setup read the check's output to its end, which
+    something it started could put off for good."""
+    held = threading.Event()
+    check = FakePip(times_out=True, held=held)
+    monkeypatch.setattr(gui.subprocess, "Popen", check)
+    app = window()
+    began = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            app._run_child(["python", "--version"], timeout=0.2)
+    finally:
+        held.set()
+    assert time.monotonic() - began < 3, "setup read the check's output to its end"
+    assert check.killed.is_set() and app._child is None
+
+
+@pytest.mark.parametrize("when", ["before the deadline", "as setup ends it"])
+def test_a_pip_that_finished_as_its_time_ran_out_counts_as_finished(monkeypatch, when):
+    """Only a pip still running at the deadline has timed out. One that has
+    exited 0, with its output read or waiting to be, has finished."""
+    pip = FakePip(PIP_OUTPUT, hang=when == "as setup ends it")
+    if when == "before the deadline":
+        pip.returncode = 0
+    else:
+        # It exits 0 by itself in the moment setup ends it.
+        pip.kill = pip.killed.set
+    monkeypatch.setattr(gui.subprocess, "Popen", pip)
+    monkeypatch.setattr(gui, "PIP_TIMEOUT", 0)
+    app = window()
+    app._pulse = lambda label: None
+    assert app._install_packages("python")
+    assert not any(tag == "err" for _, tag in app.logged)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX, Windows uses job objects")
+def test_a_build_in_a_group_of_its_own_cannot_hold_setup_past_the_deadline(children,
+                                                                           monkeypatch):
+    """Ending pip's process group doesn't reach it, so setup says so rather
+    than wait on the output it keeps open."""
+    monkeypatch.setattr(gui, "PIP_TIMEOUT", 2.5)
+    children.apart = True
+    app = window()
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, sys.executable)
+    pip = children.wait_for(0)
+    worker.join(10)
+    assert not worker.is_alive(), "setup waited on output the build kept open"
+    assert outcome == [False]
+    assert [msg for msg, tag in app.logged if tag == "err"] == [
+        "  Timed out after 10 minutes.", "  Something pip started is still running."]
+    assert stopped(pip / "pip")
+
+
+class Kernel32:
+    """Windows' kernel32 as setup calls it, with some calls replaced."""
+
+    def __init__(self, real, **replaced):
+        self.real = real
+        self.__dict__.update(replaced)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="job objects are Windows only")
+def test_pip_is_in_its_job_before_it_can_start_a_build(children, monkeypatch):
+    """pip ran before it joined its job, so a build it started meanwhile was
+    outside the job, outlived a quit and held setup's read of pip's output."""
+    real = gui._kernel32
+
+    def slow_job(*args):
+        # Time for a pip already running to start its build.
+        time.sleep(1.5)
+        return real.CreateJobObjectW(*args)
+
+    monkeypatch.setattr(gui, "_kernel32", Kernel32(real, CreateJobObjectW=slow_job))
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    app = window(installing=True)
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, sys.executable)
+    pip = children.wait_for(0)
+    app._close()
+    assert stopped(pip / "build"), "the build was outside the job and outlived the quit"
+    worker.join(5)
+    assert isinstance(outcome[0], gui._Quit)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="job objects are Windows only")
+def test_where_windows_refuses_a_job_nothing_runs(children, monkeypatch):
+    """pip ran outside a job, so its build outlived the timeout and held
+    setup's read of pip's output. Now setup says why and runs nothing."""
+    import ctypes
+
+    def refuse(job, process):
+        ctypes.set_last_error(5)  # ERROR_ACCESS_DENIED
+        return 0
+
+    monkeypatch.setattr(gui, "_kernel32",
+                        Kernel32(gui._kernel32, AssignProcessToJobObject=refuse))
+    monkeypatch.setattr(gui, "PIP_TIMEOUT", 2.5)
+    app = window()
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, sys.executable)
+    worker.join(8)
+    assert not worker.is_alive(), "setup was held by a build it could not stop"
+    assert outcome == [False]
+    time.sleep(0.5)
+    assert not count(children.folders[0] / "pip"), "pip ran outside a job"
+    errors = [msg for msg, tag in app.logged if tag == "err"]
+    assert len(errors) == 1 and errors[0].startswith("  Could not run pip: Windows")
