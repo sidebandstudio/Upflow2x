@@ -672,7 +672,7 @@ def main() -> int:
     # fail on its first print. The panel reads the log as UTF-8.
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (AttributeError, ValueError):
             pass
     args = build_parser().parse_args()

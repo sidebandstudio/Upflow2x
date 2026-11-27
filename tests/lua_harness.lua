@@ -34,7 +34,11 @@ local function new_widget(spec)
     function w:GetItem(i) return self.__entries[i + 1] end
     function w:Count() return #self.__entries end
     function w:Clear() self.__entries = {} end
-    function w:Start() self.__running = true end
+    -- H.timer_start_fails models a timer that exists but will not start.
+    function w:Start()
+        if H.timer_start_fails then error("the timer would not start") end
+        self.__running = true
+    end
     function w:Stop() self.__running = false end
 
     if w.Enabled == nil then w.Enabled = true end
@@ -49,8 +53,10 @@ local function collect(widget, out)
 end
 
 -- UIManager: ui:VGroup{...}, ui:Label{...} etc. all just build descriptors.
+-- H.no_timer models a Resolve build without ui:Timer.
 local ui = setmetatable({}, {
     __index = function(_, kind)
+        if kind == "Timer" and H.no_timer then error("no ui:Timer on this build") end
         return function(_self, spec, ...)
             -- ui:VGap(size) and ui:HGap(size, weight) take numbers.
             local gap = type(spec) ~= "table" and { spec, ... } or nil
@@ -103,6 +109,22 @@ function dispatcher:AddWindow(attrs, layout)
     function win:GetItems() return items end
     function win:Show() self.__shown = true end
     function win:Hide() self.__shown = false end
+    -- Every size the panel asks the window for, in H.resizes, and the size
+    -- the window then has, in H.size. As in Qt, a window never goes below
+    -- its MinimumSize. Size() reports H.size, or before any Resize the size
+    -- the window opened at: H.native_size models a window that came up at
+    -- another size than its Geometry, as measured in Resolve.
+    H.resizes, H.size = {}, nil
+    function win:Resize(size)
+        H.resizes[#H.resizes + 1] = { size[1], size[2] }
+        local least = attrs.MinimumSize or { 0, 0 }
+        H.size = { math.max(size[1], least[1] or 0), math.max(size[2], least[2] or 0) }
+    end
+    function win:Size()
+        local size = H.size or H.native_size
+        if size then return { size[1], size[2] } end
+        return { attrs.Geometry[3], attrs.Geometry[4] }
+    end
     function win:AddChild(child)
         if child and child.ID then items[child.ID] = child end
         table.insert(self.__extra, child)
@@ -153,7 +175,8 @@ end
 function H.make_resolve(clip_file_path)
     local mpi = {
         GetClipProperty = function(_self)
-            return { ["File Path"] = clip_file_path, FPS = H.clip_fps or "24" }
+            return { ["File Path"] = H.clip_file or clip_file_path, FPS = H.clip_fps or "24",
+                     Frames = H.clip_frames }
         end,
     }
     local item = { GetMediaPoolItem = function(_self) return mpi end }
@@ -462,7 +485,11 @@ function H.load(script_path, clip_file_path)
         table.insert(H.prints, table.concat(parts, "\t"))
     end
 
+    -- H.after_status_read and H.after_claim run as the panel opens, as they
+    -- do during a click.
+    local restore = H.interleave()
     local ok, err = pcall(dofile, script_path)
+    restore()
 
     os.execute = real_execute
     print = real_print
@@ -496,6 +523,69 @@ function H.fire(id, event)
     if not ok then error(err) end
 end
 
+-- H.after_status_read, when set, runs once during the next click, right after
+-- the panel first reads its status file as a status, or finds none: the run
+-- writing its status or exit code between the panel's reads. The panel still
+-- gets what it read, as a read that came first would. A check that the file
+-- is there, which opens it as bytes, does not count as that read.
+-- H.after_claim runs once during the next click, right after the panel first
+-- tries to move its status file aside, whether or not there was one to move.
+-- Each is cleared once it has run, so a test can tell that it did.
+-- A run's status file, under the names from before 0.5.2 or a run's own.
+local function is_status_file(path)
+    path = tostring(path)
+    return path:find("%.eternal2x_status%.json$") ~= nil
+        or path:find("%.upflow2x_run%-[%w%-]+%.json$") ~= nil
+end
+
+local function interleave()
+    local claim_hook = H.after_claim
+    local real_rename = os.rename
+    if claim_hook then
+        os.rename = function(from, to)
+            local ok, err = real_rename(from, to)
+            if claim_hook and is_status_file(from) then
+                local run = claim_hook
+                claim_hook = nil
+                H.after_claim = nil
+                run()
+            end
+            return ok, err
+        end
+    end
+    local hook = H.after_status_read
+    if not hook then return function() os.rename = real_rename end end
+    local real_open = io.open
+    io.open = function(path, mode)
+        if not (hook and is_status_file(path) and (mode or "r") == "r") then
+            return real_open(path, mode)
+        end
+        local f = real_open(path, mode)
+        local body = f and f:read("*a")
+        if f then f:close() end
+        local run = hook
+        hook = nil
+        H.after_status_read = nil
+        run()
+        if not f then return nil end
+        local left = body
+        return {
+            read = function(_self)
+                local out = left or ""
+                left = ""
+                return out
+            end,
+            close = function(_self) return true end,
+        }
+    end
+    return function()
+        io.open = real_open
+        os.rename = real_rename
+    end
+end
+-- H.load, above, runs them as the panel opens, too.
+H.interleave = interleave
+
 function H.click(id)
     local handler = on(id).Clicked
     if not handler then error("no Clicked handler for " .. tostring(id)) end
@@ -503,7 +593,9 @@ function H.click(id)
     local real_print = print
     os.execute = H.make_execute(real_execute)
     print = function(...) end
+    local restore = interleave()
     local ok, err = pcall(handler, {})
+    restore()
     os.execute = real_execute
     print = real_print
     if not ok then error(err) end
@@ -521,10 +613,30 @@ function H.set_combo(id, index)
     if handler then handler({}) end
 end
 
+-- Whether UIManager hands this widget's `event` to its handler. Clicked
+-- reaches it by default, others only once its Events attribute turns them on.
+local function delivered(id, event)
+    if event == "Clicked" then return true end
+    local events = H.widgets[id].Events
+    return events ~= nil and events[event] == true
+end
+
+-- A click with the mouse, or Space: Qt changes the state, then emits
+-- toggled, then clicked. Each handler gets the new state as On.
 function H.set_checkbox(id, value)
     H.widgets[id].Checked = value
-    local handler = on(id).Clicked
-    if handler then handler({}) end
+    for _, event in ipairs({ "Toggled", "Clicked" }) do
+        local handler = on(id)[event]
+        if handler and delivered(id, event) then handler({ On = value }) end
+    end
+end
+
+-- What Windows' accessibility Toggle does to a checkbox or checkable button:
+-- Qt calls toggle(), which emits toggled and never clicked.
+function H.toggle(id, value)
+    H.widgets[id].Checked = value
+    local handler = on(id).Toggled
+    if handler and delivered(id, "Toggled") then handler({ On = value }) end
 end
 
 function H.combo_items(id)
@@ -537,6 +649,13 @@ function H.enabled(id)
 end
 
 function H.set_source_range(a, b) H.source_range = { a, b } end
+-- Moves the playhead to another clip on the same track, of another file, as
+-- an editor does going on to the next shot. H.clip_file overrides the file.
+function H.next_clip(file, id, start, length)
+    H.clip_file, H.item_id = file, id
+    H.src_span = { start, start + length }
+    table.insert(H.tracks[H.item_track or 1], H.src_span)
+end
 function H.add_marker(frame, custom)
     H.markers = H.markers or {}
     H.markers[frame] = { color = "Blue", name = "", note = "", duration = 1, customData = custom or "" }

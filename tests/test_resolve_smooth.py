@@ -514,6 +514,29 @@ def test_the_panels_stop_ends_the_run(make_anime, monkeypatch, tmp_path):
     assert not list(out.rglob("*.mp4")) and not list(out.rglob("*.png"))
 
 
+@pytest.mark.parametrize("how", ["stopped", "finished"])
+def test_runs_with_status_files_of_their_own_touch_only_their_own(make_anime, monkeypatch,
+                                                                  tmp_path, how):
+    """The panel gives each run a status path of its own, and the stage finds
+    its Stop and its unfinished status beside it. Run A, given up on, ending
+    late beside run B, never takes B's Stop or writes over B's status."""
+    src = make_anime(holds=(2,) * 8)
+    a = tmp_path / ".upflow2x_run-a.json"
+    b = tmp_path / ".upflow2x_run-b.json"
+    b.write_text('{"done": false, "fraction": 0.5}')
+    b.with_suffix(".stop").write_text("")
+    if how == "stopped":
+        a.with_suffix(".stop").write_text("")
+    code = run(monkeypatch, ["--video", str(src), "--status-file", str(a),
+                             "--output-dir", str(tmp_path / "o")])
+    assert code == (1 if how == "stopped" else 0)
+    assert json.loads(a.read_text())["done"] is True
+    assert json.loads(b.read_text()) == {"done": False, "fraction": 0.5}
+    assert b.with_suffix(".stop").exists(), "A's end took B's Stop"
+    assert sorted(p.name for p in tmp_path.glob(".upflow2x_run-*")) == [
+        ".upflow2x_run-a.json", ".upflow2x_run-b.json", ".upflow2x_run-b.stop"]
+
+
 def test_a_stop_while_the_last_frames_are_written_still_counts(make_anime, monkeypatch,
                                                                 tmp_path):
     src = make_anime(holds=(2,) * 8)
@@ -930,6 +953,29 @@ def test_missing_packages_are_reported_to_the_panel(monkeypatch, tmp_path):
     payload = json.loads(status.read_text(encoding="utf-8"))
     assert payload["done"] is True and payload["ok"] is False
     assert "cv2" in payload["message"]
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_failure_log_is_readable_when_the_panel_sees_done(monkeypatch, tmp_path, json_mode):
+    monkeypatch.setattr(smooth, "IMPORT_ERROR", ImportError("No module named 'cv2'"))
+    status = tmp_path / "status.json"
+    log = tmp_path / "run.log"
+    replace = Path.replace
+    at_publish = []
+
+    def inspect_publish(temp, target):
+        result = replace(temp, target)
+        if target == status:
+            at_publish.append(log.read_text(encoding="utf-8"))
+        return result
+
+    monkeypatch.setattr(Path, "replace", inspect_publish)
+    with log.open("w", encoding="utf-8") as stream:
+        monkeypatch.setattr(sys, "stderr" if json_mode else "stdout", stream)
+        args = ["--video", "x.mov", "--status-file", str(status)]
+        assert run(monkeypatch, args + (["--json"] if json_mode else [])) == 3
+    assert len(at_publish) == 1
+    assert "No module named 'cv2'" in at_publish[0]
 
 
 def test_the_final_status_survives_a_reader_holding_the_file(tmp_path, monkeypatch):

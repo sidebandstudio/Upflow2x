@@ -2,6 +2,8 @@
    doing the talking. */
 
 :root {
+    /* Native scrollbars and controls come out dark to match. */
+    color-scheme: dark;
     --bg: #101013;
     --panel: #191a1e;
     --raise: #23242a;
@@ -512,6 +514,12 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -.025em; }
 .older a { color: var(--soft); }
 .older .retired th { color: var(--amber); border-top: 1px solid var(--line); }
 .older .retired td { color: #868684; }
+.older a { white-space: nowrap; }
+@media (max-width: 520px) {
+    .older th, .older td { padding: 12px clamp(4px, 1.5vw, 8px); }
+    .older th { letter-spacing: normal; }
+    .older a { white-space: normal; }
+}
 
 /* help */
 
@@ -652,6 +660,9 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -.025em; }
 .faq summary::after { content: "+"; flex: none; font: 400 20px/1 var(--mono); color: var(--amber); transition: transform .2s ease; }
 .faq details[open] summary::after { transform: rotate(45deg); }
 .faq .answer { padding: 0 0 18px; }
+
+.doc .changes { margin: 10px 0 12px; padding-left: 20px; }
+.doc .changes li + li { margin-top: 6px; }
 
 .callout {
     margin: 20px 0 0;

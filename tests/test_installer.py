@@ -519,15 +519,14 @@ def test_a_reinstall_repairs_the_private_python_it_reuses(tmp_path, monkeypatch)
     import importlib
     gui = importlib.import_module("Installer.gui_installer")
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(gui, "_check_python", lambda path: True)
-    monkeypatch.setattr(gui.subprocess, "run", lambda *a, **k:
-                        subprocess.CompletedProcess(a[0], 0))
+    monkeypatch.setattr(gui, "_check_python", lambda path, run: True)
     python_dir = tmp_path / "python"
     python_dir.mkdir()
     (python_dir / "python.exe").write_bytes(b"")
     pth = python_dir / "python311._pth"
     pth.write_text("python311.zip\n.\nimport site\n", encoding="utf-8")
-    assert gui._find_embedded_python(tmp_path) == str(python_dir / "python.exe")
+    passes = lambda args: subprocess.CompletedProcess(args, 0)
+    assert gui._find_embedded_python(tmp_path, passes) == str(python_dir / "python.exe")
     assert ".." in pth.read_text(encoding="utf-8").splitlines()
 
 
@@ -545,10 +544,14 @@ def test_the_gui_installer_opens_no_console_windows():
     tree = ast.parse(Path(gui.__file__).read_text(encoding="utf-8"))
     calls = [node for node in ast.walk(tree)
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-             and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"]
+             and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"
+             and node.func.attr != "CompletedProcess"]
     assert calls
+    # Either **_NO_WINDOW, or flags of its own built from it, as for a child
+    # that starts suspended.
     for call in calls:
         assert any(kw.arg is None and getattr(kw.value, "id", "") == "_NO_WINDOW"
+                   or kw.arg == "creationflags" and "_NO_WINDOW" in ast.unparse(kw.value)
                    for kw in call.keywords), f"line {call.lineno} would open a console"
 
 
@@ -651,10 +654,32 @@ def test_the_gui_installer_prefers_the_python_running_it(monkeypatch):
     import importlib
     gui = importlib.import_module("Installer.gui_installer")
     monkeypatch.setattr(gui.shutil, "which", lambda name: None)
-    assert gui._find_system_python() == sys.executable
+    def run(args):
+        return subprocess.run(args, capture_output=True, text=True, timeout=10)
+    assert gui._find_system_python(run) == sys.executable
 
 
 def test_a_fresh_install_has_no_quality_setting(tmp_path):
     """The in-betweens are always drawn by the network, so there is no choice."""
     conf = inst.write_config(tmp_path, Path("/repo"), "python3").read_text()
     assert "quality=" not in conf
+
+
+@pytest.mark.parametrize("module", ["Installer.install_upflow2x", "Installer.gui_installer"])
+def test_render_chime_starts_off_and_a_chosen_one_is_kept(tmp_path, module):
+    """Off in a fresh install, off for a config from before it, and kept by
+    a reinstall once the panel has saved it."""
+    import importlib
+    installer = importlib.import_module(module)
+    fresh = installer.write_config(tmp_path, Path("/plugin"), "/usr/bin/python3")
+    assert read_conf(fresh)["render_chime"] == "false"
+
+    old = {k: v for k, v in read_conf(fresh).items() if k != "render_chime"}
+    fresh.write_text("".join(f"{k}={v}\n" for k, v in old.items()), encoding="utf-8")
+    assert read_conf(installer.write_config(tmp_path, Path("/plugin"),
+                                            "/usr/bin/python3"))["render_chime"] == "false"
+
+    fresh.write_text(fresh.read_text(encoding="utf-8").replace(
+        "render_chime=false", "render_chime=true"), encoding="utf-8")
+    assert read_conf(installer.write_config(tmp_path, Path("/plugin"),
+                                            "/usr/bin/python3"))["render_chime"] == "true"

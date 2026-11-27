@@ -8,18 +8,25 @@
     <link rel="canonical" href="https://upflow2x.com/download.html">
     <meta name="theme-color" content="#101013">
     <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Upflow2x">
     <meta property="og:url" content="https://upflow2x.com/download.html">
     <meta property="og:title" content="Download Upflow2x">
     <meta property="og:description" content="A free DaVinci Resolve Studio plugin that draws the in-betweens anime was never drawn with.">
-    <meta property="og:image" content="https://upflow2x.com/assets/og.jpg">
+    <meta property="og:image" content="https://upflow2x.com/assets/social-preview.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+    <meta property="og:image:alt" content="Upflow2x. Upscale and smooth anime in Resolve. Above, a bouncing ball as drawn on 2s, each drawing held for two frames. Below, the same bounce from Upflow2x, with an amber in-between drawn in place of each held frame.">
     <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="https://upflow2x.com/assets/social-preview.png">
+    <meta name="twitter:image:alt" content="Upflow2x. Upscale and smooth anime in Resolve. Above, a bouncing ball as drawn on 2s, each drawing held for two frames. Below, the same bounce from Upflow2x, with an amber in-between drawn in place of each held frame.">
     <link rel="icon" href="assets/icon.svg?v=20261027d" type="image/svg+xml">
     <link rel="icon" href="assets/favicon.png?v=20261027d" type="image/png" sizes="32x32">
     <link rel="apple-touch-icon" href="assets/apple-touch-icon.png?v=20261027d">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/site.css?v=20261115a">
+    <link rel="stylesheet" href="css/site.css?v=20261123a">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -78,6 +85,7 @@
                     Upflow2xInstaller-mac.zip
                 </a>
                 <p class="size">Extract the zip and open Upflow2xInstaller.app. The same app works on Apple Silicon and Intel. In-betweens run on the CPU, and Super Scale upscales.</p>
+                <p class="size">If setup v0.5.1 stops at Downloading Python with a certificate error, <a href="help.html#mac-certificate">start it from Terminal</a> instead.</p>
             </article>
         </div>
 
@@ -112,13 +120,16 @@
 
         <section class="section" id="older" aria-labelledby="older-title">
             <div class="section-head">
-                <h2 id="older-title">Older versions</h2>
+                <h2 id="older-title">Release history</h2>
             </div>
             <div class="older">
                 <table>
                     <thead><tr><th scope="col">Version</th><th scope="col">Released</th><th scope="col">Windows</th><th scope="col">macOS</th></tr></thead>
-                    <!-- Written in, so the list still shows when GitHub's API is rate
-                         limited. When the API answers, the script redraws it. -->
+                    <!-- Written in, so the list still shows without script or when
+                         GitHub's API is rate limited. A row goes in before its
+                         successor ships, so the page can't know whether it is the
+                         newest yet. The heading stays neutral until the script finds
+                         out, then reads Older versions. -->
                     <tbody id="older-rows">
                         <tr><td>0.5.1</td><td class="when">Nov 10, 2026</td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.1/upflow2x-win.zip">Windows zip</a></td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.1/upflow2x-mac.zip">macOS zip</a></td></tr>
                         <tr><td>0.5.0</td><td class="when">Oct 31, 2026</td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-win.zip">Windows zip</a></td><td><a href="https://github.com/sidebandstudio/Upflow2x/releases/download/v0.5.0/upflow2x-mac.zip">macOS zip</a></td></tr>
@@ -186,6 +197,10 @@ function cell(row, url, label) {
     td.appendChild(a);
 }
 
+// Only GitHub's release list says which version /releases/latest is. The
+// release workflow moves the update feed after it publishes, so in between, a
+// script that trusted the feed would call the old release the newest and
+// drop its zips.
 fetch('https://api.github.com/repos/' + REPO + '/releases')
     .then(function (res) {
         // A rate-limited API answers with an error object, not a list.
@@ -211,7 +226,8 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
         });
 
         // The API's list replaces the written-in rows, so a release taken
-        // down later loses its row along with its downloads.
+        // down later loses its row along with its downloads. Every row left
+        // came out before the newest, so the heading can say so.
         var rows = document.getElementById('older-rows');
         rows.textContent = '';
         published.slice(1).forEach(function (release) {
@@ -223,24 +239,12 @@ fetch('https://api.github.com/repos/' + REPO + '/releases')
             cell(row, assetUrl(release, 'upflow2x-win.zip'), 'Windows zip');
             cell(row, assetUrl(release, 'upflow2x-mac.zip'), 'macOS zip');
         });
+        document.getElementById('older-title').textContent = 'Older versions';
     })
     .catch(function () {
-        // The API is down or rate limited. The buttons above still open the
-        // newest release, the written-in rows stay, and the update feed, which
-        // has no such limit, still names the version.
-        return fetch('https://raw.githubusercontent.com/' + REPO + '/main/update/latest.json')
-            .then(function (res) {
-                if (!res.ok) throw new Error('feed returned ' + res.status);
-                return res.json();
-            })
-            .then(function (feed) {
-                if (typeof feed.version !== 'string') return;
-                document.querySelectorAll('[data-version]').forEach(function (tag) {
-                    tag.textContent = 'v' + feed.version;
-                    tag.classList.remove('pending');
-                });
-            })
-            .catch(function () {});
+        // Down or rate limited. Nothing here can say which version is newest,
+        // so the page stays as written: buttons that open the newest release,
+        // a neutral heading, and every written-in zip.
     });
 </script>
 </body>

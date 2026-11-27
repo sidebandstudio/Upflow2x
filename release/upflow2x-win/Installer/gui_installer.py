@@ -10,20 +10,27 @@ That works on both Windows (official embeddable package) and macOS
 
 from __future__ import annotations
 
+import collections
+import contextlib
+import ctypes
 import io
+import locale
 import os
 import platform
+import re
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
 import tarfile
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 # The config format lives with the command-line installer so the two cannot
 # drift. This runs standalone and from a PyInstaller bundle, where the repo
@@ -94,6 +101,162 @@ BORDER = "#1e1e26"
 _NO_WINDOW = ({"creationflags": subprocess.CREATE_NO_WINDOW}
               if sys.platform.startswith("win") else {})
 
+# pip builds a package it has no wheel for in processes of its own, a build
+# backend and a compiler. Ending pip alone left those running, and any that
+# held pip's output kept setup's read of it waiting. So each child setup
+# starts goes in a job object of its own on Windows, or a session of its own
+# elsewhere, and is ended with everything it started.
+if os.name == "nt":
+    import msvcrt
+    from ctypes import wintypes
+
+    class _JobLimits(ctypes.Structure):
+        """JOBOBJECT_EXTENDED_LIMIT_INFORMATION. Setup sets only flags."""
+        _fields_ = [("time_limits", ctypes.c_int64 * 2), ("flags", wintypes.DWORD),
+                    ("working_set", ctypes.c_size_t * 2), ("process_limit", wintypes.DWORD),
+                    ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                    ("scheduling", wintypes.DWORD), ("io", ctypes.c_uint64 * 6),
+                    ("memory", ctypes.c_size_t * 4)]
+
+    # A kernel32 of its own, so these argument types change nothing elsewhere.
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    _kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int,
+                                                  wintypes.LPVOID, wintypes.DWORD)
+    _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _kernel32.PeekNamedPipe.argtypes = (wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                                        wintypes.LPVOID, wintypes.LPDWORD, wintypes.LPVOID)
+    # A child starts suspended until it is in its job, so it can start
+    # nothing outside it. NtResumeProcess resumes it whole. It is missing
+    # from Windows' published API but has been in ntdll since XP, and psutil
+    # resumes processes with it.
+    _ntdll = ctypes.WinDLL("ntdll")
+    _ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+    _ntdll.NtResumeProcess.restype = ctypes.c_long
+    _CREATE_SUSPENDED = 0x4
+
+
+class _Uncontained(OSError):
+    """Windows refused the job object a child would run in, so it was ended
+    before it ran. It says nothing about the program the child was."""
+
+
+def _start(args: list[str], **kwargs) -> tuple[subprocess.Popen, int | None]:
+    """Start a child that _end can stop with every process it starts. Returns
+    it and, on Windows, its job object. Where Windows refuses the job, the
+    child is ended before it has run, and _Uncontained says so."""
+    if os.name != "nt":
+        return subprocess.Popen(args, start_new_session=True, **kwargs, **_NO_WINDOW), None
+    child = subprocess.Popen(args, **kwargs,
+                             creationflags=_NO_WINDOW["creationflags"] | _CREATE_SUSPENDED)
+    job = _kernel32.CreateJobObjectW(None, None)
+    # Closing the last handle to the job ends whatever is left in it, so
+    # setup exiting, however it exits, leaves nothing running.
+    limits = _JobLimits(flags=0x2000)  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if (job and _kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits),
+                                                  ctypes.sizeof(limits))
+            and _kernel32.AssignProcessToJobObject(job, child._handle)
+            and _ntdll.NtResumeProcess(child._handle) == 0):
+        return child, job
+    error = ctypes.get_last_error()
+    child.kill()
+    child.wait()
+    _close_job(job)
+    raise _Uncontained("Windows would not let setup keep track of the processes it starts "
+                       f"(error {error}).")
+
+
+def _end(child: subprocess.Popen, job: int | None) -> None:
+    """Stop child and what it started: its job on Windows, its process group
+    elsewhere. Their copies of its output pipe close with them."""
+    if job:
+        _kernel32.TerminateJobObject(job, 1)
+        return
+    # The group is named by child's ID, which can pass to another process
+    # once Popen has reaped child. Popen reaps only while holding
+    # _waitpid_lock, so with that held and no exit code yet, the ID is still
+    # child's, and so is the group.
+    with child._waitpid_lock:
+        if child.returncode is None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                # The group can't be signalled, so end the child itself.
+                child.kill()
+
+
+class _SigInfo(ctypes.Structure):
+    """siginfo_t as macOS's <sys/signal.h> lays it out, for its waitid."""
+    _fields_ = [("si_signo", ctypes.c_int), ("si_errno", ctypes.c_int),
+                ("si_code", ctypes.c_int), ("si_pid", ctypes.c_int32),
+                ("si_uid", ctypes.c_uint32), ("si_status", ctypes.c_int),
+                ("si_addr", ctypes.c_void_p), ("si_value", ctypes.c_void_p),
+                ("si_band", ctypes.c_int64), ("pad", ctypes.c_uint64 * 7)]
+
+
+# Python 3.12 and older have no os.waitid on macOS, though macOS has waitid,
+# so there setup calls it itself.
+if sys.platform == "darwin" and not hasattr(os, "waitid"):
+    _darwin_waitid = ctypes.CDLL(None, use_errno=True).waitid
+    _darwin_waitid.argtypes = (ctypes.c_int, ctypes.c_uint32, ctypes.POINTER(_SigInfo),
+                               ctypes.c_int)
+
+
+def _exit_status(child: subprocess.Popen) -> int | None:
+    """child's exit code once it has exited, else None. On macOS and Linux
+    waitid reads it with WNOWAIT, which leaves child unreaped, so until setup
+    reaps it its ID still names its process group, and setup can tell
+    success from failure first."""
+    if os.name == "nt" or child.returncode is not None:
+        return child.poll()
+    if hasattr(os, "waitid"):
+        result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if result is None:
+            return None
+        code, status = result.si_code, result.si_status
+    else:
+        # macOS's P_PID, and WEXITED | WNOHANG | WNOWAIT. While child runs,
+        # waitid leaves info as it was, with no pid in it.
+        info = _SigInfo()
+        if _darwin_waitid(1, child.pid, ctypes.byref(info), 0x4 | 0x1 | 0x20) == -1:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        if not info.si_pid:
+            return None
+        code, status = info.si_code, info.si_status
+    # CLD_EXITED, 1 on macOS and Linux alike. Otherwise a signal ended it.
+    return status if code == 1 else -status
+
+
+def _let_go(child: subprocess.Popen) -> None:
+    """Once nothing will signal child's group by its ID, reap child if it has
+    ended, so the ID can pass on."""
+    child.poll()
+
+
+def _close_job(job: int | None) -> None:
+    if job:
+        _kernel32.CloseHandle(job)
+
+
+def _read_ready(fd: int) -> bytes | None:
+    """What the pipe at fd holds now, without waiting for more: b"" while it
+    holds nothing, None once every writer has closed it. On macOS and Linux fd
+    has to be non-blocking."""
+    if os.name == "nt":
+        ready = wintypes.DWORD()
+        if not _kernel32.PeekNamedPipe(msvcrt.get_osfhandle(fd), None, 0, None,
+                                       ctypes.byref(ready), None):
+            return None
+        return os.read(fd, min(ready.value, 65536)) if ready.value else b""
+    try:
+        return os.read(fd, 65536) or None
+    except BlockingIOError:
+        return b""
+
 
 def _find_repo_root() -> Path:
     if getattr(sys, "frozen", False):
@@ -125,22 +288,28 @@ def _read_version(repo_root: Path) -> str:
     return "?"
 
 
-def _check_python(path: str) -> bool:
+# The checks below run Python through `run`, which setup gives them: like
+# subprocess.run with the output captured, but in a child Quit can end, and
+# none starts after Quit. A check Windows would not run says nothing of the
+# Python, so _Uncontained goes on up rather than mark a working Python broken,
+# which would have setup replace it.
+
+def _check_python(path: str, run) -> bool:
     try:
-        result = subprocess.run(
-            [path, "-c", "import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] < (3, 15)))"],
-            capture_output=True, text=True, timeout=10, **_NO_WINDOW,
-        )
+        result = run(
+            [path, "-c", "import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] < (3, 15)))"])
         return result.returncode == 0
+    except _Uncontained:
+        raise
     except Exception:
         return False
 
 
-def _find_system_python() -> str | None:
+def _find_system_python(run) -> str | None:
     # Run as a script, the Python running this window is the one the user
     # chose, such as `py Installer\gui_installer.py` with nothing on PATH.
     if (not getattr(sys, "frozen", False) and sys.executable
-            and _check_python(sys.executable)):
+            and _check_python(sys.executable, run)):
         return sys.executable
     candidates = (
         ["python", "python3"] if sys.platform.startswith("win")
@@ -148,7 +317,7 @@ def _find_system_python() -> str | None:
     )
     for name in candidates:
         path = shutil.which(name)
-        if path and _check_python(path):
+        if path and _check_python(path, run):
             return path
     return None
 
@@ -176,7 +345,7 @@ def _embedded_python_exe(repo_root: Path) -> Path:
     return repo_root / "python" / "bin" / "python3"
 
 
-def _find_embedded_python(repo_root: Path) -> str | None:
+def _find_embedded_python(repo_root: Path, run) -> str | None:
     exe = _embedded_python_exe(repo_root)
     # Older installers left the ._pth without the plugin folder. Repair it
     # before reusing this Python, or the panel still cannot import Stages.
@@ -185,21 +354,19 @@ def _find_embedded_python(repo_root: Path) -> str | None:
             pth.write_text(_patch_pth(pth.read_text(encoding="utf-8")), encoding="utf-8")
         except OSError:
             pass
-    if exe.exists() and _check_python(str(exe)):
-        result = subprocess.run([str(exe), "-m", "pip", "--version"],
-                                capture_output=True, text=True, timeout=10, **_NO_WINDOW)
+    if exe.exists() and _check_python(str(exe), run):
+        result = run([str(exe), "-m", "pip", "--version"])
         if result.returncode == 0:
             return str(exe)
     return None
 
 
-def _python_version_str(python_path: str) -> str:
+def _python_version_str(python_path: str, run) -> str:
     try:
-        r = subprocess.run(
-            [python_path, "--version"],
-            capture_output=True, text=True, timeout=10, **_NO_WINDOW,
-        )
+        r = run([python_path, "--version"])
         return (r.stdout + r.stderr).strip()
+    except _Uncontained:
+        raise
     except Exception:
         return python_path
 
@@ -235,6 +402,45 @@ def _download_with_progress(url: str, callback=None) -> bytes:
         if callback and total > 0:
             callback(downloaded, total)
     return data.getvalue()
+
+
+# How long pip may take over the packages before setup gives up on it.
+PIP_TIMEOUT = 600
+
+# How long setup goes on reading pip's output after pip has ended. Something
+# pip started outside its process group can keep the output open for good.
+OUTPUT_GRACE = 2
+
+# A line of pip's output longer than this is cut here, so output with no line
+# ends can't fill memory.
+LINE_LIMIT = 4096
+
+# How long setup waits, once its window has closed, for the install thread to
+# end a child process that was still starting when Quit was pressed.
+QUIT_GRACE = 5
+
+
+class _Quit(BaseException):
+    """Setup was quit. Not an Exception, so nothing on the way out catches it,
+    and the install thread stops without starting anything more."""
+
+
+def _pip_step(line: str) -> str | None:
+    """What a line of pip's output says it is doing, short enough for the
+    label under the bar. None for the lines in between."""
+    text = line.strip()
+    words = text.split()
+    if len(words) > 1 and words[0] == "Collecting":
+        name = re.split(r"[<>=!~;\[(]", words[1])[0]
+        return f"Getting {name}..."
+    if len(words) > 1 and words[0] == "Downloading":
+        # A wheel's file name, or its whole URL in older pips, then its size.
+        name = words[1].rsplit("/", 1)[-1].split("-")[0]
+        size = re.search(r"\s(\(\d+(?:\.\d+)?\s+[A-Za-z]+\))$", text)
+        return f"Downloading {name}" + (f" {size[1]}" if size else "") + "..."
+    if text.startswith("Installing collected packages:"):
+        return f"Installing {text.split(':', 1)[1].strip()}..."
+    return None
 
 
 def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
@@ -293,6 +499,21 @@ class InstallerApp:
         self.installing = False
         self.install_done = False
         self.python_path: str | None = None
+        # Quit sets _quit and ends _child, the process the install thread is
+        # waiting on, with everything it started, through its job, _job, on
+        # Windows. The job is used and closed only under the lock, and
+        # neither thread holds it for more than a moment, so Quit never waits
+        # on the install thread.
+        self._quit = threading.Event()
+        self._child_lock = threading.Lock()
+        self._child: subprocess.Popen | None = None
+        self._job: int | None = None
+        self._worker: threading.Thread | None = None
+        # The step pip is on, for the label. The install thread only sets it,
+        # and _show_step shows it from the window's own thread. A call into
+        # the window from the install thread waits on the window, which must
+        # never hold up pip's deadline.
+        self._step: str | None = None
 
         self._build_ui()
 
@@ -386,9 +607,19 @@ class InstallerApp:
             bg=BTN_BG, fg=FG, activebackground="#1e1e28",
             activeforeground=FG, borderwidth=0, relief="flat",
             padx=26, pady=10, cursor="hand2",
-            command=self.root.destroy,
+            command=self._close,
         )
         self.close_btn.pack(side="left", padx=8)
+
+        # Enter presses the button that has focus, Install to begin with, so
+        # it never installs with Close focused. invoke does nothing on a
+        # disabled button, as Install is while it runs and once it's done.
+        # Escape and the window's own close button go through Close's check.
+        for button in (self.install_btn, self.close_btn):
+            button.bind("<Return>", lambda event, button=button: button.invoke())
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.bind("<Escape>", lambda event: self._close())
+        self.install_btn.focus_set()
 
         self._log("Upflow2x needs:", "accent")
         for line in REQUIREMENTS:
@@ -417,9 +648,21 @@ class InstallerApp:
         self.log_text.configure(state="disabled")
 
     def _set_progress(self, value: float, label: str = ""):
+        if str(self.progress.cget("mode")) == "indeterminate":
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
         self.progress["value"] = value
         self.progress_label.configure(text=label)
         self.root.update_idletasks()
+
+    def _pulse(self, label: str):
+        """For a step with no measure of how far it has got, such as pip. The
+        bar keeps moving, so setup doesn't look stuck, and the label says what
+        it is on. The next _set_progress stops it."""
+        if str(self.progress.cget("mode")) != "indeterminate":
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(15)
+        self.progress_label.configure(text=label)
 
     # ---- Install thread management ----------------------------------------
 
@@ -427,21 +670,119 @@ class InstallerApp:
         if self.installing or self.install_done:
             return
         self.installing = True
-        self.install_btn.configure(state="disabled", bg="#555555")
-        threading.Thread(target=self._run_install, daemon=True).start()
+        self.install_btn.configure(state="disabled", bg="#555555", text="Installing...")
+        self._worker = threading.Thread(target=self._run_install, daemon=True)
+        self._worker.start()
+        self._show_step(self._worker)
+
+    def _show_step(self, worker: threading.Thread, shown: str | None = None):
+        """Show _step, looking every 100 ms while worker's install runs. A
+        step set between two looks is skipped. Once the install has finished,
+        or Try Again has started another, it stops."""
+        if worker is not self._worker or not self.installing:
+            return
+        step = self._step
+        if step and step != shown:
+            self._pulse(step)
+            shown = step
+        self.root.after(100, self._show_step, worker, shown)
 
     def _run_install(self):
         try:
             self._do_install()
+        except _Quit:
+            pass
         except Exception as exc:
-            self.root.after(0, self._log, f"\nFatal error: {exc}", "err")
+            if not self._quit.is_set():
+                self.root.after(0, self._log, f"\nFatal error: {exc}", "err")
         finally:
-            self.root.after(0, self._on_finish)
+            # After a quit the window is gone, with nobody to tell.
+            if not self._quit.is_set():
+                self.root.after(0, self._on_finish)
 
     def _on_finish(self):
         self.installing = False
         if not self.install_done:
-            self.install_btn.configure(state="normal", bg=ACCENT)
+            # Each step logs what went wrong. Without this the label stayed on
+            # the step that failed, as if it were still running.
+            self._set_progress(0, "Setup did not finish.")
+            self._log("\nSetup did not finish. Sort out the problem in red above, "
+                      "then press Try Again.", "err")
+            self.install_btn.configure(state="normal", bg=ACCENT, text="Try Again")
+
+    def _close(self):
+        """Close the window, asking first while setup runs. Quitting partway
+        can leave an update half copied over the version Resolve loads."""
+        if self.installing and not messagebox.askyesno(
+                "Quit setup?",
+                "Setup is still running. If you quit now, Upflow2x may not open in "
+                "Resolve until you run setup again.\n\nQuit anyway?",
+                icon="warning", default="no", parent=self.root):
+            return
+        # A child process has no window, so left running it would go on
+        # installing unseen. One still starting is ended by the install
+        # thread, which sees _quit once Popen returns.
+        with self._child_lock:
+            self._quit.set()
+            if self._child is not None:
+                _end(self._child, self._job)
+        self.root.destroy()
+
+    def _check_quit(self):
+        """Stop the install thread here if setup has been quit."""
+        if self._quit.is_set():
+            raise _Quit()
+
+    def _launch(self, args: list[str], **kwargs) -> subprocess.Popen:
+        """Start a child process that Quit can end. After a quit none starts,
+        and one that was starting as Quit was pressed is ended at once."""
+        self._check_quit()
+        child, job = _start(args, **kwargs)
+        with self._child_lock:
+            quit_meanwhile = self._quit.is_set()
+            if not quit_meanwhile:
+                self._child, self._job = child, job
+        if quit_meanwhile:
+            _end(child, job)
+            _close_job(job)
+            _let_go(child)
+            raise _Quit()
+        return child
+
+    def _stop(self, child: subprocess.Popen):
+        """End child with everything it started, unless it has been released."""
+        with self._child_lock:
+            if self._child is child:
+                _end(child, self._job)
+
+    def _release(self, child: subprocess.Popen):
+        with self._child_lock:
+            if self._child is child:
+                if self._job:
+                    # Closing the job ends anything the child left running.
+                    _close_job(self._job)
+                else:
+                    _let_go(child)
+                self._child = self._job = None
+
+    def _run_child(self, args: list[str], timeout: float = 10,
+                   **kwargs) -> subprocess.CompletedProcess:
+        """subprocess.run with the output captured, for a child Quit can end."""
+        child = self._launch(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, **kwargs)
+        try:
+            stdout, stderr = child.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._stop(child)
+            # The child only, and not for long. What it started outside its
+            # process group can keep its output open for good.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                child.wait(OUTPUT_GRACE)
+            raise
+        finally:
+            self._release(child)
+        self._check_quit()
+        return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
 
     # ---- Embedded Python: Windows -----------------------------------------
 
@@ -482,7 +823,7 @@ class InstallerApp:
             return None
 
         self.root.after(0, self._log, "  Installing pip...", "dim")
-        self.root.after(0, self._set_progress, 28, "Installing pip...")
+        self.root.after(0, self._pulse, "Installing pip...")
 
         try:
             pip_data = _download_with_progress(GET_PIP_URL)
@@ -494,10 +835,10 @@ class InstallerApp:
         get_pip_path.write_bytes(pip_data)
 
         try:
-            result = subprocess.run(
+            # Started like pip itself, so Quit can end it.
+            result = self._run_child(
                 [python_exe, str(get_pip_path), "--no-warn-script-location"],
-                capture_output=True, text=True, timeout=120,
-                cwd=str(python_dir), **_NO_WINDOW,
+                timeout=120, cwd=str(python_dir),
             )
             if result.returncode != 0:
                 self.root.after(0, self._log,
@@ -579,7 +920,8 @@ class InstallerApp:
 
         self.root.after(0, self._set_progress, 30, "Verifying Python...")
 
-        if not _check_python(python_exe):
+        self._check_quit()
+        if not _check_python(python_exe, self._run_child):
             self.root.after(0, self._log, "  Extracted Python is not working.", "err")
             return None
 
@@ -597,25 +939,102 @@ class InstallerApp:
 
     def _install_packages(self, python_path: str) -> bool:
         req_file = self.source_root / "requirements.txt"
-        if req_file.exists():
-            pip_cmd = [python_path, "-m", "pip", "install",
-                       "-r", str(req_file), "--no-warn-script-location", "--quiet"]
-        else:
-            pip_cmd = [python_path, "-m", "pip", "install",
-                       "numpy", "opencv-python", "--no-warn-script-location", "--quiet"]
-
+        packages = ["-r", str(req_file)] if req_file.exists() else ["numpy", "opencv-python"]
+        # Not quiet, so the label follows pip from package to package. A
+        # minute or two at one spot on the bar looked like setup had hung.
+        pip_cmd = [python_path, "-m", "pip", "install", *packages,
+                   "--no-warn-script-location", "--progress-bar", "off"]
+        self.root.after(0, self._pulse, "Installing packages...")
         try:
-            result = subprocess.run(pip_cmd, capture_output=True, text=True, timeout=600,
-                                    **_NO_WINDOW)
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-                self.root.after(0, self._log, f"  Failed: {stderr[:200]}", "err")
-                return False
-        except subprocess.TimeoutExpired:
-            self.root.after(0, self._log, "  Timed out after 10 minutes.", "err")
+            # Unbuffered, or pip's lines would arrive in blocks.
+            proc = self._launch(pip_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        except OSError as exc:
+            self.root.after(0, self._log, f"  Could not run pip: {exc}", "err")
             return False
-        except FileNotFoundError:
-            self.root.after(0, self._log, "  Could not run pip.", "err")
+
+        # Only what has arrived is read, here, so setup never waits on output
+        # something pip started keeps open. Once it stops reading it closes
+        # its end, and whatever still writes to the pipe is refused.
+        deadline = time.monotonic() + PIP_TIMEOUT
+        tail = collections.deque(maxlen=50)
+        partial = b""
+        timed_out = drained = False
+        ended = None
+        try:
+            fd = proc.stdout.fileno()
+            if os.name != "nt":
+                os.set_blocking(fd, False)
+            encoding = locale.getpreferredencoding(False)
+            while True:
+                chunk = b"" if drained else _read_ready(fd)
+                if chunk is None:
+                    drained = True
+                    received, partial = [partial], b""
+                else:
+                    received = (partial + chunk).split(b"\n")
+                    partial = received.pop()
+                    if len(partial) > LINE_LIMIT:
+                        received.append(partial)
+                        partial = b""
+                step = None
+                for raw in received:
+                    line = raw[:LINE_LIMIT].decode(encoding, "replace").rstrip()
+                    if line:
+                        tail.append(line)
+                        step = _pip_step(line) or step
+                if not chunk:
+                    time.sleep(0.1)
+                status = _exit_status(proc)
+                running = status is None
+                # Only a pip still running at the deadline has timed out.
+                if running and not timed_out and time.monotonic() > deadline:
+                    timed_out = True
+                    self._stop(proc)
+                # The label shows the last step read. Nothing here calls into
+                # the window, so however busy it is, or however much pip
+                # prints at once, the deadline holds.
+                if step:
+                    self._step = step
+                if running:
+                    # A pip that won't end isn't waited on for good.
+                    if timed_out and time.monotonic() > deadline + OUTPUT_GRACE:
+                        break
+                    continue
+                if ended is None:
+                    ended = time.monotonic()
+                    # pip failed. What is left in its own group or job is
+                    # setup's to end, now, before pip is reaped and its ID can
+                    # pass on. What a pip that succeeded started is left be. A
+                    # timeout or Quit has ended it already.
+                    if status != 0 and not (timed_out or self._quit.is_set()):
+                        self._stop(proc)
+                # By now pip's own output has all been read. After a success
+                # nothing more is waited for; after a failure, a little.
+                elif drained or time.monotonic() - ended > (OUTPUT_GRACE if status else 0):
+                    break
+        finally:
+            self._step = None
+            proc.stdout.close()
+            self._release(proc)
+        self._check_quit()
+        # What pip was seen to exit with decides, not its return code, which
+        # is set only once pip is reaped, and letting go of it doesn't wait
+        # for that. A pip that exited 0 as the deadline came has finished.
+        if timed_out and status != 0:
+            self.root.after(0, self._log, "  Timed out after 10 minutes.", "err")
+            if not drained:
+                self.root.after(0, self._log, "  Something pip started is still running.",
+                                "err")
+            return False
+        if status != 0:
+            # pip's ERROR lines come last and say what went wrong. The first
+            # 200 characters, shown before, could stop at a retry warning.
+            lines = [line for line in tail if line.strip()]
+            errors = [line for line in lines if line.startswith("ERROR:")] or lines[-3:]
+            self.root.after(0, self._log, "  pip could not install the packages:", "err")
+            for line in errors[-3:]:
+                self.root.after(0, self._log, f"    {line.strip()[:300]}", "err")
             return False
         return True
 
@@ -647,19 +1066,24 @@ class InstallerApp:
         self.root.after(0, self._log, "\nLooking for Python...")
         self.root.after(0, self._set_progress, 12, "Looking for Python...")
 
-        python_path = _find_embedded_python(self.repo_root)
+        # Each check runs Python, so none starts once setup has been quit.
+        self._check_quit()
+        python_path = _find_embedded_python(self.repo_root, self._run_child)
         python_source = "embedded"
 
+        self._check_quit()
         if python_path:
             self.root.after(0, self._log,
-                            f"  Using bundled Python: {_python_version_str(python_path)}", "ok")
+                            f"  Using bundled Python: "
+                            f"{_python_version_str(python_path, self._run_child)}", "ok")
         elif not getattr(sys, "frozen", False):
-            python_path = _find_system_python()
+            python_path = _find_system_python(self._run_child)
             python_source = "system"
 
+        self._check_quit()
         if python_path and python_source == "system":
             self.root.after(0, self._log,
-                            f"  Found: {_python_version_str(python_path)}", "ok")
+                            f"  Found: {_python_version_str(python_path, self._run_child)}", "ok")
 
         if not python_path:
             self.root.after(0, self._log,
@@ -734,6 +1158,11 @@ class InstallerApp:
 
     def run(self):
         self.root.mainloop()
+        # The window is gone. A child that was starting as Quit was pressed
+        # is ended by the install thread once Popen returns, so Python waits
+        # a little for it before exiting, which would halt that thread.
+        if self._worker is not None:
+            self._worker.join(timeout=QUIT_GRACE)
 
 
 def main():

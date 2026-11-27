@@ -208,25 +208,69 @@ local DO_INTERPOLATE = parse_bool(conf["interpolate"], true)
 -- How big a change Analyse counts as a new drawing, 1 to 9, 5 the default.
 local THRESHOLD = math.max(1, math.min(9, math.floor(tonumber(conf["threshold"] or "5") or 5)))
 local FORMAT = conf["format"] or "png"
+-- A short sound when a render lands on the timeline. Off unless turned on,
+-- also for a config from before it existed.
+local CHIME = parse_bool(conf["render_chime"], false)
 
-local STATUS_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_status.json")
--- Stop creates this, and the run ends at its next frame.
-local STOP_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_status.stop")
--- The frames marked on the clip go to the stage in this file. A long clip's
--- list does not fit on a Windows command line.
-local MARKS_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_marks.txt")
-local LOG_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".upflow2x_last_run.log")
+local RUN_DIR = REPO_ROOT ~= "" and REPO_ROOT or root
 -- The update check runs each time the panel opens, so it logs apart from
 -- renders. Sharing a log wiped the render's, the one worth sending in.
-local UPDATE_LOG_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_update.log")
-local RUN_SCRIPT = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_run.cmd")
+local UPDATE_LOG_PATH = join_path(RUN_DIR, ".eternal2x_update.log")
 -- Opens Explorer at a render, for the same reason the run goes through a
 -- script: see Show in Folder.
-local REVEAL_SCRIPT = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_reveal.cmd")
--- Written by the shell once Python exits, however it exits. A Python that
--- cannot start never writes a status file, so this is how the panel tells a
--- run that is still going from one that died.
-local EXIT_PATH = join_path(REPO_ROOT ~= "" and REPO_ROOT or root, ".eternal2x_exit")
+local REVEAL_SCRIPT = join_path(RUN_DIR, ".eternal2x_reveal.cmd")
+
+-- Each run has files of its own, named by a tag the panel gives it:
+--   status  Python's progress and result, moved into place whole each time
+--   tmp     where Python writes the status before moving it
+--   stop    Stop creates this, and the run ends at its next frame
+--   exit    written by the shell once Python exits, however it exits. A
+--           Python that cannot start never writes a status, so this is how
+--           the panel tells a run still going from one that died
+--   marks   the frames marked on the clip. A long clip's list does not fit on
+--           a Windows command line
+--   script  the command a run starts from on Windows
+--   log     everything the run printed
+--   reset   where Reset moves the status to read it, see claim_status
+--   seen    no longer written or read. An earlier build of 0.5.2 noted here
+--           that a panel had shown how the run ended. Named, so it goes with
+--           the run's other files. The status, left empty, says it now
+-- Python finds tmp and stop beside the status, so they follow its name. A
+-- run the panel has given up on can still be writing, and with files of its
+-- own it never writes over, stops or ends the run after it. Tag "" is the one
+-- set of names every run had before 0.5.2, so a run from then is still found.
+local function run_files(tag)
+    local names
+    if tag == "" then
+        names = { status = ".eternal2x_status.json", tmp = ".eternal2x_status.tmp",
+                  stop = ".eternal2x_status.stop", exit = ".eternal2x_exit",
+                  marks = ".eternal2x_marks.txt", script = ".eternal2x_run.cmd",
+                  log = ".upflow2x_last_run.log", seen = ".upflow2x_last_run.seen",
+                  reset = ".eternal2x_status.json.reset" }
+    else
+        local base = ".upflow2x_run-" .. tag
+        names = { status = base .. ".json", tmp = base .. ".tmp", stop = base .. ".stop",
+                  exit = base .. ".exit", marks = base .. ".marks", script = base .. ".cmd",
+                  log = base .. ".log", seen = base .. ".seen", reset = base .. ".json.reset" }
+    end
+    for kind, name in pairs(names) do names[kind] = join_path(RUN_DIR, name) end
+    return names
+end
+
+-- Names the run the panel owns, the only one it follows, stops or imports.
+-- A panel opened later reads it to find that run. Opening a file to write
+-- empties it, so a new pointer is written beside it and moved into place.
+local RUN_POINTER = join_path(RUN_DIR, ".upflow2x_run")
+local POINTER_OLD = RUN_POINTER .. ".old"
+local RUN_TAG, STATUS_PATH, STOP_PATH, EXIT_PATH, RUN_SCRIPT, LOG_PATH
+
+local function use_run(tag)
+    local files = run_files(tag)
+    RUN_TAG = tag
+    STATUS_PATH, STOP_PATH, EXIT_PATH = files.status, files.stop, files.exit
+    RUN_SCRIPT, LOG_PATH = files.script, files.log
+end
+use_run((read_file(RUN_POINTER) or read_file(POINTER_OLD) or ""):match("^%s*([%w%-]*)"))
 
 local function save_conf()
     local f = io.open(CONF_PATH, "w")
@@ -240,6 +284,7 @@ local function save_conf()
     f:write("interpolate=" .. (DO_INTERPOLATE and "true" or "false") .. "\n")
     f:write("threshold=" .. tostring(THRESHOLD) .. "\n")
     f:write("format=" .. FORMAT .. "\n")
+    f:write("render_chime=" .. (CHIME and "true" or "false") .. "\n")
     f:close()
 end
 
@@ -316,13 +361,23 @@ local function clip_range(item, props, rate)
     -- used at 60 fps but one past it at 23.976 (20.3.1), so the clip's length
     -- settles it. A retimed clip's length is no guide and keeps the end frame.
     local length = call("GetDuration")
+    local range = nil
     if f1 and length and rate and math.abs(rate - fps) < 0.001 and math.abs(f1 - f0 - length) <= 1 then
-        return { start = start, finish = (f0 + length) / fps }
+        range = { start = start, finish = (f0 + length) / fps }
+    elseif f1 and f1 >= f0 then
+        range = { start = start, finish = (f1 + 1) / fps }
+    else
+        local t0, t1 = call("GetSourceStartTime"), call("GetSourceEndTime")
+        if t0 and t1 and t1 > t0 then range = { start = start, finish = start + (t1 - t0) } end
     end
-    if f1 and f1 >= f0 then return { start = start, finish = (f1 + 1) / fps } end
-    local t0, t1 = call("GetSourceStartTime"), call("GetSourceEndTime")
-    if t0 and t1 and t1 > t0 then return { start = start, finish = start + (t1 - t0) } end
-    return nil
+    -- Every clip has a range, so the panel only calls one trimmed that starts
+    -- after the file's first frame, or ends before its last where Resolve
+    -- says how many frames the file has.
+    if range then
+        local frames = tonumber(tostring(props["Frames"] or ""):match("^%s*(%d+)"))
+        range.trimmed = f0 > 0 or (frames ~= nil and range.finish < (frames - 0.5) / fps)
+    end
+    return range
 end
 
 -- A file's name without its folder or extension.
@@ -557,14 +612,14 @@ local function build_command(module_name, args, background, log)
         -- the rest of the script as UTF-8, so non-ASCII paths survive.
         -- Binary mode keeps Lua from turning \r\n into \r\r\n. The exit code
         -- line puts the redirection first, because `echo 2> file` would
-        -- redirect stderr instead of writing 2. Unwritten, the script left
-        -- from the last run would start in its place, so nothing starts.
+        -- redirect stderr instead of writing 2. A script not written whole
+        -- would start a shell with no Python, so nothing starts.
         local f = io.open(RUN_SCRIPT, "wb")
         if not f then return nil end
-        f:write("@echo off\r\nchcp 65001 >nul\r\n", (cd:gsub("%%", "%%%%")), "\r\n",
+        local wrote = f:write("@echo off\r\nchcp 65001 >nul\r\n", (cd:gsub("%%", "%%%%")), "\r\n",
                 ((run .. redirect):gsub("%%", "%%%%")), "\r\n",
                 ">", (shell_quote(EXIT_PATH):gsub("%%", "%%%%")), " echo %ERRORLEVEL%\r\n")
-        f:close()
+        if not (f:close() and wrote) then return nil end
         -- /MIN gives the run its own minimised window. With /B it shared the
         -- console os.execute opens, which stayed on screen for the whole
         -- render, and closing it killed the render without a word.
@@ -701,10 +756,9 @@ local function start_script(script, fallback)
     return (ok == true or ok == 0)
 end
 
--- True once the run is on its way. Python reports from then on.
-local function run_background(module_name, args)
-    local cmd = build_command(module_name, args, true)
-    if not cmd then return false end
+-- Starts `cmd`, a background command build_command made, which writes what
+-- it needs first. True once the run is on its way. Python reports from then on.
+local function run_background(cmd)
     print("[Upflow2x] " .. cmd)
     if is_windows() then return start_script(RUN_SCRIPT, cmd) end
     local ok = execute(cmd)
@@ -782,11 +836,7 @@ end
 
 -- The status file is written by Stages/resolve_smooth.py as a flat JSON
 -- object with a fixed shape, so the panel reads it without a full parser.
-local function read_status()
-    local f = io.open(STATUS_PATH, "r")
-    if not f then return nil end
-    local s = f:read("*a") or ""
-    f:close()
+local function parse_status(s)
     if s == "" then return nil end
     return {
         stage    = json_string(s, "stage") or "",
@@ -805,10 +855,29 @@ local function read_status()
     }
 end
 
-local function clear_status()
-    os.remove(STATUS_PATH)
-    os.remove(EXIT_PATH)
-    os.remove(STOP_PATH)
+local function read_status_at(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local s = f:read("*a") or ""
+    f:close()
+    return parse_status(s)
+end
+
+-- Reset reads a status by moving it aside. If moving it back fails, it is
+-- read from there while the status itself is missing, until the run is dealt
+-- with. Not for a run from before 0.5.2: 0.5.1 reuses its names and never
+-- clears that one, so it could be an older run's. Returns what it holds.
+local function claimed()
+    if RUN_TAG == "" or exists(STATUS_PATH) then return nil end
+    return read_file(STATUS_PATH .. ".reset")
+end
+
+local function read_status()
+    local st = read_status_at(STATUS_PATH)
+    if st then return st end
+    -- Only a finished one: Reset deletes a claim of a run still going.
+    local kept = parse_status(claimed() or "")
+    return kept and kept.done and kept or nil
 end
 
 -- The exit code of the last background run, or nil while it is still going.
@@ -853,48 +922,67 @@ local function themed(sheet)
 end
 
 -- Resolve's UI Manager ignores #name selectors in a window's style sheet, so
--- every widget that looks different from the rest carries its own.
+-- every widget that looks different from the rest carries its own. Text the
+-- panel needs read is $text or $soft, at least 4.5:1 on the panel's grey.
+-- $mute is for what is switched off. Amber fills only Render, and marks a
+-- switch that is on and a Stop waiting for its second press.
+-- A focused control gets a light border, or an underline for a link, for
+-- whoever moves through the panel with Tab.
 local TITLE = themed("QLabel { font-size: 17px; font-weight: 600; color: $text; }")
 local BADGE = themed([[QLabel { background-color: $amber; color: $on_amber; border-radius: 4px;
     padding: 1px 5px; font-family: Consolas, Menlo, monospace; font-size: 10px; font-weight: 700; }]])
-local VERSION = themed("QLabel { color: $mute; font-size: 11px; }")
-local HAIRLINE = themed("QLabel { background-color: $hair; }")
+local VERSION = themed("QLabel { color: $soft; font-size: 11px; }")
 local INFO = themed([[QLabel { color: $soft; border: 1px solid $line; border-radius: 8px;
     font-family: Georgia, serif; font-size: 10px; font-weight: 700; }]])
-local CARD = themed([[QLabel { background-color: $field; border: 1px solid $hair;
-    border-radius: 6px; padding: 7px 10px; color: $text; font-size: 12px; }]])
+-- The clip's name, plain under the title.
+local SOURCE = themed("QLabel { color: $text; font-size: 12px; }")
 local NOTE = themed("QLabel { color: $soft; font-size: 11px; }")
+-- What a switch does to the render, under it.
+local MODE = themed("QLabel { color: $soft; font-size: 11px; padding: 0px 2px; }")
+local STATUS = themed("QLabel { color: $text; font-size: 11px; }")
 local FIELD_LABEL = themed("QLabel { color: $soft; font-size: 12px; }")
-local META = themed("QLabel { color: $mute; font-size: 10px; }")
+local META = themed("QLabel { color: $soft; font-size: 11px; }")
 local PROGRESS = themed("QLabel { color: $soft; font-size: 11px; font-family: Consolas, Menlo, monospace; }")
 local START = themed([[
     QPushButton { background-color: $amber; border: none; border-radius: 8px;
         color: $on_amber; font-size: 15px; font-weight: 700; }
     QPushButton:hover { background-color: $amber_hover; }
     QPushButton:pressed { background-color: $amber_down; }
-    QPushButton:disabled { background-color: $raise; color: $mute; }
+    QPushButton:focus { border: 2px solid $text; }
+    QPushButton:disabled { background-color: $raise; color: $mute; border: none; }
 ]])
--- On or off at a glance: the whole tile lights up when it is on. They are
--- checkable buttons, since a checkbox only takes a click on its dot and words.
+-- The whole tile is the switch, since a checkbox only takes a click on its
+-- dot and words. On, its name turns bold and its border amber, and the line
+-- under it starts with On, so the state never rests on colour alone.
 local TOGGLE = themed([[
     QPushButton { background-color: $raise; border: 1px solid $line; border-radius: 8px;
         padding: 0px 12px; min-height: 34px; font-size: 13px; color: $soft; }
     QPushButton:hover { background-color: $hover; }
-    QPushButton:checked { border-color: $amber; color: $text; background-color: rgba(242, 169, 59, 40); }
-    QPushButton:checked:hover { background-color: rgba(242, 169, 59, 64); }
+    QPushButton:checked { border-color: $amber; color: $text; font-weight: 700;
+        background-color: rgba(242, 169, 59, 28); }
+    QPushButton:checked:hover { background-color: rgba(242, 169, 59, 48); }
+    QPushButton:focus { border-color: $text; }
 ]])
 local BUTTON = themed([[
     QPushButton { background-color: $raise; border: 1px solid $line; border-radius: 6px;
-        min-height: 30px; padding: 3px 10px; font-size: 12px; color: $text; }
+        min-height: 24px; padding: 3px 12px; font-size: 12px; color: $text; }
     QPushButton:hover { background-color: $hover; }
     QPushButton:pressed { background-color: $field; }
+    QPushButton:focus { border-color: $text; }
     QPushButton:disabled { background-color: $panel; border-color: $hair; color: $mute; }
 ]])
 local LINK = themed([[
     QPushButton { background-color: transparent; border: none; padding: 2px 4px;
         min-height: 18px; font-size: 11px; color: $soft; }
     QPushButton:hover { color: $amber; }
+    QPushButton:focus { color: $text; text-decoration: underline; }
     QPushButton:disabled { color: $mute; }
+]])
+-- Stop after one press, waiting for the second.
+local LINK_ASKING = themed([[
+    QPushButton { background-color: transparent; border: none; padding: 2px 4px;
+        min-height: 18px; font-size: 11px; color: $amber; font-weight: 700; }
+    QPushButton:focus { text-decoration: underline; }
 ]])
 local WINDOW = themed([[
     QWidget { background-color: $panel; color: $text; font-size: 12px; }
@@ -903,16 +991,21 @@ local WINDOW = themed([[
         padding: 4px 8px; min-height: 18px; color: $text;
     }
     QComboBox:hover { border-color: $line; }
+    QComboBox:focus { border-color: $text; }
     QComboBox QAbstractItemView {
         background-color: $field; border: 1px solid $line; outline: none;
-        selection-background-color: $amber; selection-color: $on_amber;
+        selection-background-color: $soft; selection-color: $field;
     }
     QSlider::groove:horizontal { height: 3px; border-radius: 1px; background-color: $field; }
-    QSlider::sub-page:horizontal { border-radius: 1px; background-color: $amber; }
+    QSlider::sub-page:horizontal { border-radius: 1px; background-color: $soft; }
     QSlider::handle:horizontal {
         width: 12px; height: 12px; margin: -5px 0; border-radius: 6px; background-color: $text;
     }
     QSlider::handle:horizontal:hover { background-color: #ffffff; }
+    QSlider::handle:horizontal:focus {
+        width: 10px; height: 10px; margin: -6px 0; border-radius: 7px;
+        border: 2px solid $soft; background-color: #ffffff;
+    }
     QToolTip { background-color: $field; color: $text; border: 1px solid $line; padding: 5px; }
 ]])
 -- A thin bar, amber up to how far the run has got. Empty, it keeps its
@@ -939,7 +1032,7 @@ local TIPS = {
     detection = "Analyse finds the real drawings and puts a marker on each one. Delete a marker to leave its frame out, or add one with M. Render uses the marked frames, and finds the drawings itself on a clip with none.",
     threshold = "How big a change Analyse counts as a new drawing. Lower catches small moves, like only a mouth. Higher counts only big ones.",
     render = "Render draws on your GPU and puts the result on the track above the clip. Resolve stays usable while it runs.",
-    upscale = "Draw every frame at 2x with Real-ESRGAN's anime model, on the GPU on Windows. Without a GPU, Resolve's Super Scale does it.\nIt shows on a timeline bigger than the clip.",
+    upscale = "On Windows, Real-ESRGAN can draw a 2x file using DirectML. On Mac, or if the model cannot run, Resolve uses Super Scale on import.\nIt shows on a timeline bigger than the clip.",
     interp = "Draw the missing in-betweens with the RIFE network, on the GPU on Windows. Its first use downloads about 50 MB.\nThe render plays at a third of the clip's speed, ready to time remap.\nOff keeps every drawing on its frame and the clip's length, and draws nothing, to upscale only.",
     format = "Image sequence is lossless and imports most reliably. MP4 is one small file but lossy, and MKV is one lossless file. All are 8-bit RGB.",
     -- The same list as Installer/install_upflow2x.py's REQUIREMENTS.
@@ -952,90 +1045,144 @@ local TIPS = {
     folder = "Where renders are saved, a folder for each project. By default that's an Upflow2x folder beside the project's Resolve cache, or Resolve's own folder. Choose a folder to keep them somewhere else, like a drive with more space.",
 }
 
-local function info(tip, id)
-    return ui:Label{ ID = id, Text = "i", ToolTip = tip, StyleSheet = INFO, Weight = 0,
-                     Alignment = { AlignCenter = true },
-                     MinimumSize = { 16, 16 }, MaximumSize = { 16, 16 } }
-end
-
--- Name, control, (i): the same three columns on every row.
-local function row(name, control, tip)
+-- A Settings row: its name, then its control. The name carries the tip.
+local function row(id, name, control, tip)
     return ui:HGroup{ Weight = 0, Spacing = 8,
-        ui:Label{ Text = name, StyleSheet = FIELD_LABEL, Weight = 0.2,
-                  Alignment = { AlignLeft = true, AlignVCenter = true } },
+        ui:Label{ ID = id, Text = name, StyleSheet = FIELD_LABEL, Weight = 0.25, ToolTip = tip,
+                  Hidden = true, Alignment = { AlignLeft = true, AlignVCenter = true } },
         control,
-        info(tip),
     }
 end
 
--- Top to bottom in the order you use it: the clip, Analyse and its
--- threshold, the two switches and the output, then Render. All in one
--- window, so nothing opens on top of it.
+-- Under a switch, whether it is on and what that does, in words show_modes writes.
+local function mode_line(id, tip)
+    return ui:Label{ ID = id, Text = "", StyleSheet = MODE, ToolTip = tip, Weight = 0,
+                     MinimumSize = { 0, 16 }, Alignment = { AlignHCenter = true, AlignTop = true } }
+end
+
+-- Two pages in one window, so nothing opens on top of it. The main page is
+-- what a render needs: the clip, the two switches and Render. Settings holds
+-- the rest, behind a button in the title row that becomes Back there. The
+-- title row and the clip's name show on both, and so does how a run is
+-- going, under either page, so a run started from Settings stays in sight.
+-- Each widget a page or a run shows or hides has an ID, as only those can
+-- be reached once the window is built. They start as the main page shows
+-- them, so nothing flashes as it opens.
+-- The width every row is laid out for. Resolve 20.3.1 opened the window 211
+-- wide, and the rows kept this width with Settings and Render cut off, so
+-- the window is held to it as a minimum, width only: a zero height leaves
+-- the height to the layout, page by page.
+local PANEL_WIDTH = 380
 local win = disp:AddWindow({
     ID = "Eternal2x",
     WindowTitle = "Upflow2x  v" .. CURRENT_VERSION,
-    Geometry = { 100, 100, 380, 506 },
+    Geometry = { 100, 100, PANEL_WIDTH, 198 },
+    MinimumSize = { PANEL_WIDTH, 0 },
     StyleSheet = WINDOW,
 }, ui:VGroup{
-    Spacing = 8,
+    Spacing = 10,
 
     ui:HGroup{ Weight = 0, Spacing = 6,
         ui:Label{ ID = "Title", Text = "Upflow", StyleSheet = TITLE, Weight = 0 },
+        -- Held to its own height, or it stretches to the Settings button's.
         ui:Label{ ID = "Badge", Text = "2X", StyleSheet = BADGE, Weight = 0,
-                  Alignment = { AlignCenter = true } },
+                  Alignment = { AlignCenter = true }, MaximumSize = { 16777215, 18 } },
         ui:HGap(0, 1),
-        ui:Label{ ID = "SubTitle", Text = "v" .. CURRENT_VERSION, StyleSheet = VERSION, Weight = 0,
-                  Alignment = { AlignRight = true, AlignVCenter = true } },
-        ui:Button{ ID = "UpdateBtn", Text = "Check for Updates", StyleSheet = LINK, Weight = 0 },
-        info(TIPS.needs, "NeedsInfo"),
+        ui:Button{ ID = "SettingsBtn", Text = "Settings", StyleSheet = BUTTON, Weight = 0,
+                   ToolTip = "Analyse, threshold, output, where renders are saved, and updates." },
+        ui:Button{ ID = "BackBtn", Text = "Back", StyleSheet = BUTTON, Weight = 0, Hidden = true,
+                   ToolTip = "Back to Render. Settings are saved as you change them." },
     },
 
-    ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = CARD,
-              WordWrap = true, MinimumSize = { 0, 46 }, ToolTip = TIPS.clip },
+    ui:Label{ ID = "SourceLabel", Text = "No clip under the playhead.", StyleSheet = SOURCE,
+              WordWrap = true, MinimumSize = { PANEL_WIDTH - 20, 18 }, ToolTip = TIPS.clip, Weight = 0 },
 
-    ui:Button{ ID = "AnalyseBtn", Text = "Analyse", StyleSheet = BUTTON, ToolTip = TIPS.detection },
-    row("Threshold", ui:HGroup{ Weight = 0.8, Spacing = 8,
-        ui:Slider{ ID = "ThresholdSlider", Weight = 1, Minimum = 1, Maximum = 9, PageStep = 1,
-                   Value = THRESHOLD, Orientation = "Horizontal" },
-        ui:Label{ ID = "ThresholdValue", Text = tostring(THRESHOLD), StyleSheet = FIELD_LABEL,
-                  Weight = 0, MinimumSize = { 10, 0 },
-                  Alignment = { AlignRight = true, AlignVCenter = true } },
-    }, TIPS.threshold),
-    ui:Label{ ID = "AnalysisLabel", Text = ANALYSIS_HINT, StyleSheet = NOTE, WordWrap = true },
-
-    ui:Label{ StyleSheet = HAIRLINE, MinimumSize = { 0, 1 }, MaximumSize = { 16777215, 1 } },
-
+    -- The main page.
     ui:HGroup{ Weight = 0, Spacing = 8,
-        ui:Button{ ID = "UpscaleCB", Text = "Upscaling", Checkable = true, Checked = DO_UPSCALE,
-                   StyleSheet = TOGGLE, ToolTip = TIPS.upscale },
-        ui:Button{ ID = "InterpCB", Text = "Interpolate", Checkable = true,
-                   Checked = DO_INTERPOLATE, StyleSheet = TOGGLE, ToolTip = TIPS.interp },
+        ui:VGroup{ Weight = 1, Spacing = 4,
+            ui:Button{ ID = "UpscaleCB", Text = "Upscaling", Checkable = true, Checked = DO_UPSCALE,
+                       StyleSheet = TOGGLE, ToolTip = TIPS.upscale, Weight = 0 },
+            mode_line("UpscaleMode", TIPS.upscale),
+        },
+        ui:VGroup{ Weight = 1, Spacing = 4,
+            ui:Button{ ID = "InterpCB", Text = "Interpolate", Checkable = true,
+                       Checked = DO_INTERPOLATE, StyleSheet = TOGGLE, ToolTip = TIPS.interp,
+                       Weight = 0 },
+            mode_line("InterpMode", TIPS.interp),
+        },
     },
-    row("Output", ui:ComboBox{ ID = "FormatCombo", Weight = 0.8 }, TIPS.format),
-    row("Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.8 }, TIPS.folder),
     ui:Button{ ID = "SmoothBtn", Text = RENDER_LABEL, StyleSheet = START, ToolTip = TIPS.render,
-               MinimumSize = { 0, 44 }, MaximumSize = { 16777215, 44 } },
+               Weight = 0, MinimumSize = { 0, 44 }, MaximumSize = { 16777215, 44 } },
 
-    ui:Label{ ID = "ProgressBar", Text = "", StyleSheet = bar_style(nil),
+    -- Settings. Analyse and the threshold it uses share a row. Render finds
+    -- the drawings itself on a clip with no markers, so neither is needed.
+    ui:HGroup{ Weight = 0, Spacing = 8,
+        ui:Button{ ID = "AnalyseBtn", Text = "Analyse", StyleSheet = BUTTON, ToolTip = TIPS.detection,
+                   Weight = 0, MinimumSize = { 84, 0 }, Hidden = true },
+        ui:Label{ ID = "ThresholdLabel", Text = "Threshold", StyleSheet = FIELD_LABEL, Weight = 0,
+                  ToolTip = TIPS.threshold, Hidden = true,
+                  Alignment = { AlignRight = true, AlignVCenter = true } },
+        ui:Slider{ ID = "ThresholdSlider", Weight = 1, Minimum = 1, Maximum = 9, PageStep = 1,
+                   Value = THRESHOLD, Orientation = "Horizontal", ToolTip = TIPS.threshold,
+                   Hidden = true },
+        ui:Label{ ID = "ThresholdValue", Text = tostring(THRESHOLD), StyleSheet = FIELD_LABEL,
+                  Weight = 0, MinimumSize = { 10, 0 }, Hidden = true,
+                  Alignment = { AlignRight = true, AlignVCenter = true } },
+    },
+    ui:Label{ ID = "AnalysisLabel", Text = ANALYSIS_HINT, StyleSheet = NOTE, WordWrap = true,
+              Weight = 0, Hidden = true },
+    row("OutputLabel", "Output", ui:ComboBox{ ID = "FormatCombo", Weight = 0.75, Hidden = true,
+                                              ToolTip = TIPS.format }, TIPS.format),
+    row("FolderLabel", "Save to", ui:ComboBox{ ID = "FolderCombo", Weight = 0.75, Hidden = true },
+        TIPS.folder),
+    -- A checkbox, so its tick says whether it is on.
+    -- Toggled is asked for as well as Clicked, as only Clicked comes unasked.
+    ui:CheckBox{ ID = "ChimeCB", Text = "Render chime", Checked = CHIME, Weight = 0, Hidden = true,
+                 Events = { Clicked = true, Toggled = true },
+                 ToolTip = "Play a short sound when a finished render lands on the timeline.",
+                 StyleSheet = themed([[
+                     QCheckBox { color: $text; font-size: 12px; spacing: 8px; }
+                     QCheckBox:focus { text-decoration: underline; }
+                 ]]) },
+    ui:HGroup{ Weight = 0, Spacing = 8,
+        ui:Label{ ID = "SubTitle", Text = "Upflow2x v" .. CURRENT_VERSION, StyleSheet = VERSION,
+                  Weight = 0, Hidden = true, Alignment = { AlignLeft = true, AlignVCenter = true } },
+        ui:Label{ ID = "NeedsInfo", Text = "i", ToolTip = TIPS.needs, StyleSheet = INFO, Weight = 0,
+                  Hidden = true, Alignment = { AlignCenter = true },
+                  MinimumSize = { 16, 16 }, MaximumSize = { 16, 16 } },
+        ui:HGap(0, 1),
+        ui:Button{ ID = "UpdateBtn", Text = "Check for Updates", StyleSheet = BUTTON, Weight = 0,
+                   Hidden = true },
+    },
+
+    -- How a run is going, under either page, each part only while it has
+    -- something to say.
+    ui:Label{ ID = "ProgressBar", Text = "", StyleSheet = bar_style(nil), Weight = 0, Hidden = true,
               MinimumSize = { 0, 4 }, MaximumSize = { 16777215, 4 } },
-    ui:Label{ ID = "Progress", Text = "", StyleSheet = PROGRESS, WordWrap = true },
-    -- Three lines, as long as a finished render's message runs. Resolve does
-    -- not grow a wrapped label to fit, so two lines cut it off top and bottom.
-    ui:Label{ ID = "Status", Text = "Ready.", StyleSheet = NOTE, WordWrap = true,
-              MinimumSize = { 0, 46 } },
-
+    -- Two lines while a run goes, set by set_busy.
+    ui:Label{ ID = "Progress", Text = "", StyleSheet = PROGRESS, WordWrap = true, Weight = 0,
+              Hidden = true, MinimumSize = { 0, 16 } },
+    -- As tall as its message, set by set_status. Resolve does not grow a
+    -- wrapped label to fit, so a finished render's message was cut off top
+    -- and bottom.
+    ui:Label{ ID = "Status", Text = "Ready.", StyleSheet = STATUS, WordWrap = true, Weight = 0,
+              Hidden = true, MinimumSize = { 0, 17 },
+              Alignment = { AlignLeft = true, AlignTop = true } },
     ui:HGroup{ Weight = 0, Spacing = 2,
         ui:Button{ ID = "CompareBtn", Text = "Show Original", StyleSheet = LINK, Enabled = false, Weight = 0,
+                   Hidden = true,
                    ToolTip = "Switch the render off and on to compare it with the original under it." },
         ui:Button{ ID = "FolderBtn", Text = "Show in Folder", StyleSheet = LINK, Enabled = false, Weight = 0,
-                   ToolTip = "Open the folder the render was saved to." },
+                   Hidden = true, ToolTip = "Open the folder the render was saved to." },
         ui:HGap(0, 1),
         ui:Button{ ID = "RefreshStatusBtn", Text = "Refresh Progress", StyleSheet = LINK, Weight = 0,
-                   ToolTip = "Read how far the run has got, if the panel stopped updating." },
-        ui:Button{ ID = "CancelBtn", Text = "Reset", StyleSheet = LINK, Weight = 0,
+                   Hidden = true, ToolTip = "Read how far the run has got, if the panel stopped updating." },
+        ui:Button{ ID = "CancelBtn", Text = "Reset", StyleSheet = LINK, Weight = 0, Hidden = true,
                    ToolTip = "Clear a run that stopped without finishing." },
     },
-    ui:Label{ ID = "Meta", Text = "", StyleSheet = META, WordWrap = true },
+    ui:Label{ ID = "Meta", Text = "", StyleSheet = META, WordWrap = true, Weight = 0, Hidden = true },
+    -- Any height the window has to spare goes here, below everything.
+    ui:VGap(0, 1),
 })
 
 
@@ -1060,6 +1207,21 @@ local function fill_folders()
 end
 fill_folders()
 
+-- Under each switch, On or Off and what that does, read from the switch
+-- itself so a setting restored from the config shows too. Upscaling asks for
+-- a 2x upscale, drawn by Real-ESRGAN where it can run and left to Super
+-- Scale where it cannot, so the words name the factor, not a file size or a
+-- GPU. Interpolate on makes the render three times as long, and off keeps
+-- the clip's length. The tips say the rest.
+local DOT = " \xC2\xB7 "
+local function show_modes()
+    items.UpscaleMode.Text = items.UpscaleCB.Checked and ("On" .. DOT .. "2x")
+        or ("Off" .. DOT .. "original size")
+    items.InterpMode.Text = items.InterpCB.Checked and ("On" .. DOT .. "3x longer")
+        or ("Off" .. DOT .. "same length")
+end
+show_modes()
+
 -- ---------------------------------------------------------------------------
 -- state
 -- ---------------------------------------------------------------------------
@@ -1082,13 +1244,149 @@ local RUNNING = false
 -- Python, a second or two later, writes its own.
 local LAUNCHED_AT = nil
 local IMPORTED = false
-local ANALYSING = false
+-- "analysis" or "render", for the run this panel started. nil for one it
+-- picked up from an earlier panel, since nothing says which that is.
+local RUN_KIND = nil
 
-local function set_status(msg)
-    items.Status.Text = msg or ""
+-- The window: which page it shows, what shows on it, kept here rather than
+-- read back, and how tall the labels that wrap are.
+--   page      "main" or "settings"
+--   timed     whether a timer drives the panel. Without one, Refresh Progress
+--             is the only way the clip and a run are read again, so it always
+--             shows. Set once the timer is made
+--   changed   something was shown or hidden, or a label's height changed
+--   fit_again ask for the window's height once more on the next tick
+--   ticked    a tick has reached the panel. With a timer made, `since` is
+--             when the panel was ready for one
+--   recover   what the run the panel owns, not followed, still needs, which
+--             keeps its way in on screen until it is handled:
+--               "pending"  a finished render not yet imported
+--               "failed"   a failure no panel has shown, from its status or
+--                          only its exit code
+--               "stale"    a run that went quiet, which Reset can clear
+--               "gave_up"  Reset gave up on it, and it may still finish
+--   stop_sent Stop was sent to the run the panel owns, so if it lands
+--             anyway, it makes no sound
+local view = {
+    page = "main", timed = false, changed = false, fit_again = false, ticked = false,
+    source_height = 18, status_height = 17, progress_height = 16,
+    -- What each page shows. Everything else shows on both, or as a run needs it.
+    main = { "SettingsBtn", "UpscaleCB", "UpscaleMode", "InterpCB", "InterpMode", "SmoothBtn" },
+    settings = { "BackBtn", "AnalyseBtn", "ThresholdLabel", "ThresholdSlider", "ThresholdValue",
+                 "AnalysisLabel", "OutputLabel", "FormatCombo", "FolderLabel", "FolderCombo",
+                 "ChimeCB", "SubTitle", "NeedsInfo", "UpdateBtn" },
+    feedback = { "ProgressBar", "Progress", "Status", "CompareBtn", "FolderBtn",
+                 "RefreshStatusBtn", "CancelBtn", "Meta" },
+    shown = {},
+}
+for _, id in ipairs(view.main) do view.shown[id] = true end
+for _, id in ipairs(view.settings) do view.shown[id] = false end
+for _, id in ipairs(view.feedback) do view.shown[id] = false end
+
+-- How many lines `text` wraps to at about `per_line` characters a line, for
+-- labels Resolve does not grow to fit. A guess on the high side, as a spare
+-- line costs less than a cut one.
+local function lines_of(text, per_line)
+    local lines = 0
+    for part in ((text or "") .. "\n"):gmatch("([^\n]*)\n") do
+        lines = lines + math.max(1, math.ceil(#part / per_line))
+    end
+    return math.max(1, lines)
+end
+
+-- A window keeps its size when what it shows gets smaller, so after a change
+-- it is asked for the height it needs. The heights are in pixels, measured
+-- on an offscreen render of these style sheets at 380 wide. Where one comes
+-- out short, Qt keeps the window as tall as its layout needs. Qt lays a
+-- window out on its next pass, and may hold it at the old height until
+-- then, so with a timer the ask is made once more on the next tick. Nothing
+-- else resizes it, so its size never moves while a run only reports progress.
+local function fit_window()
+    local shown, gap = view.shown, 10
+    local height = (view.page == "settings" and 289 or 198) + view.source_height - 18
+    if shown.Progress then height = height + 4 + view.progress_height + 2 * gap end
+    if shown.Status then height = height + view.status_height + gap end
+    if shown.CompareBtn or shown.FolderBtn or shown.RefreshStatusBtn or shown.CancelBtn then
+        height = height + 22 + gap
+    end
+    if shown.Meta then height = height + lines_of(items.Meta.Text, 56) * 15 + gap end
+    -- The panel's width, or the window's where someone has made it wider. A
+    -- width read back is never taken when it is narrower: the window can
+    -- report the size it came up at before it is laid out, and taking that
+    -- kept Resolve's 211 wide window from then on.
+    local width = PANEL_WIDTH
+    pcall(function()
+        local size = win:Size()
+        local now = tonumber(size[1] or size.Width)
+        if now and now > width then width = math.floor(now + 0.5) end
+    end)
+    pcall(function() win:Resize({ width, height }) end)
+    view.fit_again = view.timed
+end
+
+-- Shows the page's controls, and of how a run is going only what has
+-- something to say: the bar while there is progress, a message other than
+-- Ready, or one the clip's line, or in Settings the analysis line, already
+-- says, unless it answers a press, Show Original and Show in Folder once
+-- they have a render, Stop while a run goes, and Reset for a run that went
+-- quiet. Refresh Progress shows while a run goes or the run the panel owns
+-- needs something, without a working timer, and always in Settings, as a
+-- timer can stall with no sign.
+local function show_what_matters()
+    -- A timer made, and no tick a few seconds after the panel was ready for
+    -- one, is a timer that does not reach the panel.
+    if view.timed and not view.ticked and view.since and os.time() - view.since >= 3 then
+        view.timed = false
+    end
+    local function set(id, shown)
+        if view.shown[id] ~= shown then
+            view.shown[id] = shown
+            items[id].Hidden = not shown
+            view.changed = true
+        end
+    end
+    local settings = view.page == "settings"
+    for _, id in ipairs(view.main) do set(id, not settings) end
+    for _, id in ipairs(view.settings) do set(id, settings) end
+    local progress = (items.Progress.Text or "") ~= ""
+    set("ProgressBar", progress)
+    set("Progress", progress)
+    local said = items.Status.Text or ""
+    set("Status", said ~= "" and said ~= "Ready."
+        and (said ~= items.SourceLabel.Text or said == view.answer)
+        and not (settings and said == items.AnalysisLabel.Text))
+    set("CompareBtn", items.CompareBtn.Enabled == true)
+    set("FolderBtn", items.FolderBtn.Enabled == true)
+    set("CancelBtn", RUNNING or view.recover == "stale")
+    set("RefreshStatusBtn", RUNNING or view.recover ~= nil or not view.timed or settings)
+    set("Meta", (items.Meta.Text or "") ~= "")
+    if view.changed then
+        view.changed = false
+        fit_window()
+    end
+end
+
+-- With answer, the message answers a press, and shows even when the clip's
+-- line already says it.
+local function set_status(msg, answer)
+    msg = msg or ""
+    view.answer = answer and msg or nil
+    items.Status.Text = msg
     -- The whole message, for one too long for the box.
-    items.Status.ToolTip = msg or ""
-    print("[Upflow2x] " .. (msg or ""))
+    items.Status.ToolTip = msg
+    local height = lines_of(msg, 56) * 15 + 2
+    if view.status_height ~= height then
+        view.status_height = height
+        items.Status.MinimumSize = { 0, height }
+        view.changed = true
+    end
+    print("[Upflow2x] " .. msg)
+    show_what_matters()
+end
+
+local function set_meta(text)
+    items.Meta.Text = text or ""
+    show_what_matters()
 end
 
 -- A stage at 0% is still shown: installing the AI runtime on first use stays
@@ -1097,11 +1395,29 @@ local function set_progress(fraction, stage)
     if not fraction or (fraction <= 0 and (stage or "") == "") then
         items.Progress.Text = ""
         items.ProgressBar.StyleSheet = bar_style(nil)
+        show_what_matters()
         return
     end
     fraction = math.min(1, fraction)
     items.ProgressBar.StyleSheet = bar_style(fraction)
     items.Progress.Text = string.format("%d%%  %s", math.floor(fraction * 100 + 0.5), stage or "")
+    show_what_matters()
+end
+
+-- Stop takes two presses. A render stopped partway deletes the frames it has
+-- drawn, and Stop sits beside Refresh Progress. The second press counts for
+-- this many seconds after the first, and after that Stop asks again.
+local STOP_CONFIRM_FOR = 5
+local STOP_ASKED = nil
+
+-- A Stop pressed once and left goes back to plain Stop, and the status back
+-- to what it said before, unless something else has been said since.
+local function stop_unasked(now)
+    local asked = STOP_ASKED
+    if not asked or (not now and math.abs(os.time() - asked.at) <= STOP_CONFIRM_FOR) then return end
+    STOP_ASKED = nil
+    items.CancelBtn.StyleSheet = LINK
+    if items.Status.Text == asked.prompt then set_status(asked.status) end
 end
 
 local function set_busy(busy)
@@ -1111,8 +1427,35 @@ local function set_busy(busy)
     items.UpdateBtn.Enabled = not busy
     items.SmoothBtn.Text = busy and "Working..." or RENDER_LABEL
     items.CancelBtn.Text = busy and "Stop" or "Reset"
-    items.CancelBtn.ToolTip = busy and "End the run now. Frames it has written stay in its folder."
+    items.CancelBtn.ToolTip = busy
+        and "End the run. Press twice, since a render stopped partway deletes the frames it has drawn."
         or "Clear a run that stopped without finishing."
+    STOP_ASKED = nil
+    items.CancelBtn.StyleSheet = LINK
+    -- Two lines while a run goes, so a stage name that wraps does not move
+    -- everything under it on a tick, and one once it has ended.
+    local progress_height = busy and 30 or 16
+    if view.progress_height ~= progress_height then
+        view.progress_height = progress_height
+        items.Progress.MinimumSize = { 0, progress_height }
+        view.changed = true
+    end
+    show_what_matters()
+end
+
+-- After a run fails, Show in Folder becomes Open Log. The log says why it
+-- failed, and it sits in a hidden folder nobody would find to send it in.
+local SHOW_LOG = false
+
+local function offer_log(on)
+    -- Only a log with something in it, or it opens an empty page.
+    SHOW_LOG = on and last_log_line() ~= nil
+    items.FolderBtn.Text = SHOW_LOG and "Open Log" or "Show in Folder"
+    items.FolderBtn.ToolTip = SHOW_LOG
+        and ("Open the log of the run that failed, to read it or send it in.\n" .. LOG_PATH)
+        or "Open the folder the render was saved to."
+    items.FolderBtn.Enabled = SHOW_LOG or LAST_OUTPUT ~= nil
+    show_what_matters()
 end
 
 -- Seconds as text that Python's float() reads, whatever the locale.
@@ -1120,25 +1463,52 @@ local function seconds(value)
     return (string.format("%.6f", value):gsub(",", "."))
 end
 
+-- The part of the file a trimmed clip uses. nil for a clip that uses all of
+-- it, or when Resolve does not say, since every clip has a range.
 local function range_text(range)
-    if not range then return "Whole file." end
-    return (string.format("%.2f s long, from %.2f s of the file.",
-                          range.finish - range.start, range.start)
+    if not (range and range.trimmed) then return nil end
+    return (string.format("Trimmed: %.2f to %.2f s", range.start, range.finish)
             :gsub("(%d),(%d)", "%1.%2"))
 end
 
 -- The timer reads the clip twice a second, and a tip set again closes under
--- the pointer, so the card is only written when it changes.
+-- the pointer, so the line is only written when it changes. It is as tall as
+-- its text, as Resolve does not grow a wrapped label to fit.
 local function show_source(text, tip)
-    if items.SourceLabel.Text ~= text then items.SourceLabel.Text = text end
+    if items.SourceLabel.Text ~= text then
+        items.SourceLabel.Text = text
+        local height = lines_of(text, 52) * 16 + 2
+        if view.source_height ~= height then
+            view.source_height = height
+            items.SourceLabel.MinimumSize = { PANEL_WIDTH - 20, height }
+            view.changed = true
+        end
+        show_what_matters()
+    end
     if items.SourceLabel.ToolTip ~= tip then items.SourceLabel.ToolTip = tip end
 end
 
--- With keep, a playhead in a gap leaves the last clip, and the card, as they are.
+-- With keep, a playhead in a gap leaves the last clip, marked as kept.
 local function refresh_source(keep)
+    -- The clip's name, and a second line only when there is more to know:
+    -- that it is the last clip used, kept while the playhead is off every
+    -- clip, so it is not taken for the clip under the playhead, and which
+    -- part a trimmed clip uses.
+    local function source_text(path, range, kept)
+        local notes = {}
+        if kept then notes[#notes + 1] = "Last usable clip" end
+        notes[#notes + 1] = range_text(range)
+        local name = short_name(basename(path))
+        if #notes == 0 then return name end
+        return name .. "\n" .. table.concat(notes, DOT)
+    end
     local path, err, range, place, item = selected_clip_path()
     if not path then
-        if keep and SOURCE_PATH then return false end
+        if keep and SOURCE_PATH then
+            show_source(source_text(SOURCE_PATH, SOURCE_RANGE, true),
+                        TIPS.clip .. "\n\n" .. SOURCE_PATH)
+            return false
+        end
         SOURCE_PATH = nil
         SOURCE_RANGE = nil
         SOURCE_PLACE = nil
@@ -1160,7 +1530,7 @@ local function refresh_source(keep)
     SOURCE_RANGE = range
     SOURCE_PLACE = place
     SOURCE_ITEM = item
-    show_source(short_name(basename(path)) .. "\n" .. range_text(range), TIPS.clip .. "\n\n" .. path)
+    show_source(source_text(path, range, false), TIPS.clip .. "\n\n" .. path)
     return true
 end
 
@@ -1538,12 +1908,16 @@ local function import_result(st)
     if not rate_ok then
         return true, notes .. " It is in the media pool, not on the timeline.", nil, hint
     end
+    -- Whether it went onto the timeline, above its clip or at the end, and
+    -- not only into the media pool.
+    local landed = false
     if pool.AppendToTimeline then
         local frames = st.sequence_frames > 0 and st.sequence_frames
             or tonumber(clip_property(mpi, "Frames"))
         local track, item, over = place_above(pool, project, mpi, frames, st.slow_motion)
         if track then
             LAST_ITEM = item
+            landed = true
             notes = notes .. ", placed on V" .. track .. " above the original"
             if over > 0 then
                 notes = notes .. string.format(", but it runs %d frame%s past it. Trim its end.",
@@ -1555,11 +1929,12 @@ local function import_result(st)
             local called, appended = pcall(function() return pool:AppendToTimeline({ mpi }) end)
             local added = called and appended and (type(appended) ~= "table" or #appended > 0)
             if added then LAST_ITEM = first_of(appended) end
+            landed = added and true or false
             notes = notes .. (added and ", added to the end of the timeline."
                                     or ". Drag it onto your timeline.")
         end
     end
-    return true, notes, nil, hint
+    return true, notes, nil, hint, landed
 end
 
 -- How long the current stage has left, from its pace since the panel first
@@ -1584,29 +1959,79 @@ local function render_location(st)
     return st.import_path
 end
 
-local function apply_status(st)
+-- With Render chime on, plays Stages/play_render_chime.py in the configured
+-- Python once a finished render lands on the timeline. It starts out of
+-- sight and is never waited on, and nothing says if it cannot play: a sound
+-- is no reason to hold up or fail a render. On Windows it goes through a
+-- script of its own, never a run's, started with no window as a run is, and
+-- not at all where that cannot be done.
+local function chime()
+    if not CHIME or REPO_ROOT == "" then return end
+    local helper = join_path(REPO_ROOT, "Stages/play_render_chime.py")
+    if not exists(helper) then return end
+    pcall(function()
+        if not is_windows() then
+            execute(shell_quote(PYTHON) .. " " .. shell_quote(helper) .. " >/dev/null 2>&1 &")
+            return
+        end
+        if not hidden_start or launch_problem() then return end
+        local script = join_path(RUN_DIR, ".upflow2x_chime.cmd")
+        local line = shell_quote(PYTHON) .. " " .. shell_quote((helper:gsub("/", "\\")))
+            .. " >nul 2>&1"
+        local f = io.open(script, "wb")
+        if not f then return end
+        f:write("@echo off\r\nchcp 65001 >nul\r\n", (line:gsub("%%", "%%%%")), "\r\n")
+        f:close()
+        hidden_start(".\\" .. basename(script), (RUN_DIR:gsub("/", "\\")))
+    end)
+end
+
+-- Marks the run the panel owns as one whose end a panel has shown, by leaving
+-- its status file in place, empty. Every panel, 0.5.1's too, reads an empty
+-- status as none, so it is no progress, render or failure to either, and a
+-- crash's last progress goes with it. The shell writes the exit code later,
+-- 1 after a Stop, and this keeps a panel opened then from taking that for a
+-- failure no one saw. It says nothing of another run: a tagged run's files
+-- are its own, and 0.5.1, which reuses one set of names, deletes the status
+-- before each run it starts.
+local function mark_seen()
+    local f = io.open(STATUS_PATH, "w")
+    if f then f:close() end
+    -- A claim Reset could not move back is dealt with too.
+    os.remove(STATUS_PATH .. ".reset")
+end
+
+-- Whether a panel has shown how the run the panel owns ended.
+local function end_shown()
+    return read_file(STATUS_PATH) == "" or claimed() == ""
+end
+
+-- With quiet, as when Stop or Reset finds the run finished, a render that
+-- lands makes no sound. Someone pressing Stop is not waiting for a chime.
+local function apply_status(st, quiet)
     if not st then return false end
     set_progress(st.fraction, st.stage .. time_left(st))
     -- Until the run is done its message only ever says Starting, and shown on
     -- every poll it would hide what the panel itself has to say.
     if st.done and st.message ~= "" then set_status(st.message) end
     if st.done then
-        -- Handled now. Left in place, Refresh Progress in a reopened panel
-        -- would import the same render again.
-        os.remove(STATUS_PATH)
+        -- Handled now. Left as it was, Refresh Progress in a reopened panel
+        -- would import the same render again, so it is emptied.
+        mark_seen()
+        view.recover = nil
         set_busy(false)
         if not st.ok then
             set_progress(0, nil)
             local why = st.message ~= "" and st.message
                 or "Failed. See the console for details."
-            if ANALYSING then items.AnalysisLabel.Text = why end
-            ANALYSING = false
+            if RUN_KIND == "analysis" then items.AnalysisLabel.Text = why end
+            -- A Stop is what the editor asked for, with nothing to look into.
+            offer_log(st.message ~= "Stopped.")
             set_status(why)
             return true
         end
         set_progress(1.0, "Finished")
-        if ANALYSING then
-            ANALYSING = false
+        if RUN_KIND == "analysis" then
             local placed, shared = 0, 0
             if ANALYSED_ITEM then placed, shared = mark_drawings(ANALYSED_ITEM, st.marks) end
             local report = st.message
@@ -1637,18 +2062,27 @@ local function apply_status(st)
         if st.import_path ~= "" and not IMPORTED then
             IMPORTED = true
             LAST_OUTPUT = render_location(st)
-            items.FolderBtn.Enabled = LAST_OUTPUT ~= nil
-            local ok, notes, where, hint = import_result(st)
+            offer_log(false)
+            local ok, notes, where, hint, landed = import_result(st)
             -- A slowed render runs past its original, so off it shows the next shot.
             items.CompareBtn.Enabled = LAST_ITEM ~= nil and st.slow_motion == 1
             items.CompareBtn.Text = "Show Original"
             if ok then
                 set_status(st.message .. " " .. notes)
                 -- Three lines of status leave no room for a tip as well.
-                if hint then items.Meta.Text = hint end
+                if hint then set_meta(hint) end
+                -- Only once it is on the timeline, and once, since the
+                -- status is emptied above and nothing imports it again. Not
+                -- for a run someone asked to stop, which finished anyway. A
+                -- render past its last Stop check leaves the stop file in
+                -- place as it lands, so a Stop sent from an earlier panel
+                -- counts too.
+                if landed and not quiet and not view.stop_sent and not exists(STOP_PATH) then
+                    chime()
+                end
             elseif where then
                 -- The status box fits three lines, too few for a path as well.
-                items.Meta.Text = short_path(where, 68)
+                set_meta(short_path(where, 68))
                 print("[Upflow2x] The render is at " .. where)
                 set_status(st.message .. " " .. notes .. " Drag it in from the path below.")
             else
@@ -1668,7 +2102,32 @@ end
 -- report it, as when its window is closed.
 local STALLED_AFTER = 180
 
+-- When the run the panel owns started: its tag begins with the time. nil for
+-- a run from before 0.5.2, whose names do not say.
+local function started_at()
+    local t = RUN_TAG:match("^(%d+)%-")
+    return t and tonumber(t)
+end
+
+-- The run the panel owns is followed again: it reports again after a stall
+-- this panel saw, or it is one an earlier panel left going, found quiet as
+-- the panel opened, or Reset gave up on. It is followed as a run going, with
+-- Stop and its progress, and what was said while it was quiet goes. An
+-- analysis this panel started marks its clip when it ends, as one followed
+-- from the start does. Nothing says which clip a run from an earlier panel
+-- was, so it marks none. The timer, started as the panel opened, reads it
+-- from here on. `said` is what the status says, by default that it reports.
+local function follow_again(st, said)
+    view.recover = nil
+    -- Its heartbeat counts until it writes again, or before its first, its start.
+    LAUNCHED_AT = (st and st.updated) or LAUNCHED_AT or started_at()
+    set_busy(true)
+    if st then set_progress(st.fraction, st.stage) end
+    set_status(said or "The run is reporting again. Its progress shows here.")
+end
+
 local function poll()
+    stop_unasked()
     local exited = read_exit_code()
     local st = read_status()
     if apply_status(st) then return true end
@@ -1678,6 +2137,7 @@ local function poll()
         local last = (st and st.updated and st.updated > 0) and st.updated or LAUNCHED_AT
         local quiet = last and (os.time() - last) or 0
         -- Quiet this long, the button clears the run, so it says Reset.
+        if quiet > STALLED_AFTER then stop_unasked(true) end
         if quiet > STALLED_AFTER and not st then
             items.CancelBtn.Text = "Reset"
             set_status(string.format("Python has not started after %d minutes. Press Reset "
@@ -1686,11 +2146,11 @@ local function poll()
             items.CancelBtn.Text = "Reset"
             set_status(string.format("No progress for %d minutes, so the run has stopped. "
                 .. "Press Reset and run it again.", math.floor(quiet / 60 + 0.5)))
-        elseif (items.Status.Text or ""):match("^No progress for")
-            or (items.Status.Text or ""):match("^Python has not started") then
-            -- It is reporting again, so the warning no longer holds.
-            items.CancelBtn.Text = "Stop"
-            set_status("Working. Resolve stays usable while this runs.")
+        elseif st and st.updated and math.abs(os.time() - st.updated) < STALLED_AFTER
+                and (not RUNNING or items.CancelBtn.Text ~= "Stop") then
+            -- Fresh progress from a run the panel had stopped following, or
+            -- offered Reset for, so the warning no longer holds.
+            follow_again(st)
         end
         return false
     end
@@ -1698,27 +2158,50 @@ local function poll()
     -- Python exited without saying it was done: it could not start, could not
     -- load a package, or crashed. Its last words are the end of the log.
     local why = last_log_line() or ("Python exited with code " .. exited .. ".")
-    local msg = "Stopped without finishing: " .. why .. " Full log: " .. LOG_PATH
+    -- Shown now, with its log. Its exit code proves it ended, so its last
+    -- progress, which would show the crash again, can go.
+    mark_seen()
+    view.recover = nil
     set_busy(false)
     set_progress(0, nil)
-    if ANALYSING then items.AnalysisLabel.Text = msg end
-    ANALYSING = false
+    -- The status box fits three lines, and the log's path took two of them.
+    offer_log(true)
+    print("[Upflow2x] Full log: " .. LOG_PATH)
+    local msg = "Stopped without finishing: " .. why
+        .. (SHOW_LOG and " Open Log shows the rest." or "")
+    if RUN_KIND == "analysis" then items.AnalysisLabel.Text = msg end
     set_status(msg)
     return true
 end
 
--- A run may still be going, even one started from an earlier panel. Python
--- writes its status at least once a frame, so a recent unfinished one means
--- it is. Only one run at a time, since runs share the script, status and
--- exit files.
-local function run_in_progress()
-    if read_exit_code() then return false end
+-- One look at the run the panel owns, even one started from an earlier
+-- panel: the exit code, then the status, each read once. Python writes its
+-- last status before it exits and the shell then writes the exit code, so a
+-- status read after the exit code is final. "finished" is a run with its
+-- result, "live" a run Stop can end, and "gone" one that died or went quiet,
+-- or no run at all. The status and exit code read come back with it.
+local function look()
+    local exited = read_exit_code()
+    -- Whether there is a status at all, looked at before it is read. A first
+    -- heartbeat written between the two then reads as a heartbeat. The other
+    -- way round, it read as neither a heartbeat nor no status, and a run just
+    -- reporting for the first time was taken for gone.
+    local present = exists(STATUS_PATH)
     local st = read_status()
-    if st and st.done then return false end
+    if st and st.done then return "finished", st, exited end
+    if exited then return "gone", st, exited end
+    -- Python writes its status at least once a frame, so a recent unfinished
+    -- one is a run going. Its first comes only once it has loaded its
+    -- packages, which can take a while, so until then a run counts from its
+    -- start, and a panel opened meanwhile follows it rather than starting
+    -- another over it. Only while it has written no status: an empty one is a
+    -- run whose end a panel showed.
     local last = (st and st.updated) or (RUNNING and LAUNCHED_AT)
+        or (not st and not present and started_at())
     -- Either way of the clock: a heartbeat from before the clock was moved
     -- back is in the future, and is no more alive than an old one.
-    return last and math.abs(os.time() - last) < STALLED_AFTER or false
+    if last and math.abs(os.time() - last) < STALLED_AFTER then return "live", st, exited end
+    return "gone", st, exited
 end
 
 -- ---------------------------------------------------------------------------
@@ -1749,6 +2232,15 @@ end
 local pick_source
 local last_spot = nil
 local function on_timeout(ev)
+    -- Ticks reach the panel, so it needs no Refresh Progress on the main view.
+    view.ticked = true
+    if not view.timed then
+        view.timed = true
+        show_what_matters()
+    end
+    -- Once, the tick after a change, by when Qt has laid the window out.
+    if view.fit_again then fit_window() end
+    view.fit_again = false
     if RUNNING then
         poll()
         return
@@ -1767,28 +2259,204 @@ if have_timer and timer then
     pcall(function() win:AddChild(timer) end)
     pcall(function() disp.On.Timeout = on_timeout end)
     pcall(function() win.On.PollTimer.Timeout = on_timeout end)
+    view.timed = true
 end
 
+-- A timer that will not start is no timer, so Refresh Progress shows.
 local function start_polling()
-    if have_timer and timer and timer.Start then
-        pcall(function() timer:Start() end)
+    if not (have_timer and timer) then return end
+    local started = timer.Start ~= nil and pcall(function() timer:Start() end)
+    if not started and view.timed then
+        view.timed = false
+        show_what_matters()
     end
 end
 
--- A run that never started has nothing to poll, so the panel says so now.
-local function start_run(args)
-    LAUNCHED_AT = os.time()
-    if run_background("Stages.resolve_smooth", args) then
-        start_polling()
-        return
+local CANNOT_START = "Could not start the run. Check that Upflow2x's folder can be written to, "
+    .. "then try again."
+
+local WAITING = "A render finished while the panel was closed. "
+    .. "Press Refresh Progress to add it to the timeline."
+local PENDING = "A finished render has not been added yet. "
+    .. "Press Refresh Progress to add it to the timeline."
+
+-- A finished run met by Stop, Reset or a new run. This panel's run is
+-- handled as a poll would, importing its render once. A render with no run
+-- to follow, such as one that finished while the panel was closed or after
+-- Reset gave up on it, waits for Refresh Progress. With quiet, a render that
+-- lands makes no sound, as apply_status says.
+-- False when there is nothing worth keeping, such as an old failure.
+local function settle(st, quiet)
+    if RUNNING or RUN_KIND == "analysis" then return apply_status(st, quiet) end
+    if st.ok and st.import_path ~= "" then
+        view.recover = "pending"
+        set_status(PENDING)
+        return true
     end
-    local msg = "Could not start the run. Check that Upflow2x's folder can be written to, "
-        .. "then try again."
-    set_busy(false)
-    set_progress(0, nil)
-    if ANALYSING then items.AnalysisLabel.Text = msg end
-    ANALYSING = false
-    set_status(msg)
+    return false
+end
+
+-- How Reset takes the status of a run the look found gone. It can still
+-- finish just after the look, so the status is moved aside in one step and
+-- read there, never deleted unread. A finished one goes back in place for the
+-- caller to handle, and a status written after the move is a new file Reset
+-- leaves. If moving it back fails, it stays aside, where read_status finds
+-- it, so a finished one is still the run's result.
+local function claim_status()
+    local aside = STATUS_PATH .. ".reset"
+    -- One kept aside from an earlier claim comes first, and is never deleted.
+    local kept = parse_status(claimed() or "")
+    if kept and kept.done then
+        os.rename(aside, STATUS_PATH)
+        return kept
+    end
+    os.remove(aside)
+    if not os.rename(STATUS_PATH, aside) then return nil end
+    local st = read_status_at(aside)
+    -- An empty one says a panel showed how the run ended, so it goes back too.
+    if (st and st.done) or read_file(aside) == "" then
+        os.rename(aside, STATUS_PATH)
+        return st
+    end
+    os.remove(aside)
+    return st
+end
+
+-- The run the panel owns comes before a new one, which would take its place:
+-- a result not yet imported, or a run Reset gave up on that turns out to be
+-- going. Checked before the new run changes anything that belongs to it: the
+-- clip, where its render goes, its markers. True when it comes first, and
+-- the new run doesn't start. Also whether that look found its exit code: the
+-- run has ended, and its status, read after the exit code, was final.
+local function last_run_first()
+    local state, st, exited = look()
+    local ended = exited ~= nil
+    if state == "finished" then
+        if settle(st) then return true, ended end
+        -- Nothing worth keeping, and a finished run writes nothing more.
+        os.remove(STATUS_PATH)
+        os.remove(STATUS_PATH .. ".reset")
+        return false, ended
+    end
+    -- Render and Analyse can only be pressed while no run is being followed,
+    -- so a live one here is one Reset gave up on, writing again. One still
+    -- loading, before its first status, is followed from the moment the panel
+    -- opens, which keeps them unpressable.
+    if state ~= "live" or not st then return false, ended end
+    -- Still going, so it is followed rather than replaced.
+    follow_again(st, "A run started earlier is still going. Its progress shows here.")
+    start_polling()
+    return true, ended
+end
+
+local RUNS_STARTED = 0
+
+-- Moves the pointer written to `new` into place. Windows moves a file only
+-- onto a name not in use, so there the pointer steps aside as
+-- POINTER_OLD first, which a panel reads while no pointer is in place. The
+-- pointer in place is never deleted, so a move that fails partway leaves the
+-- last run found. False when the new pointer is not in place.
+local function commit_pointer(new)
+    local moved = os.rename(new, RUN_POINTER)
+    if not moved and exists(RUN_POINTER) then
+        -- With the pointer in place, an old one is left from a move that
+        -- finished.
+        os.remove(POINTER_OLD)
+        if os.rename(RUN_POINTER, POINTER_OLD) then
+            moved = os.rename(new, RUN_POINTER)
+            if not moved then os.rename(POINTER_OLD, RUN_POINTER) end
+        end
+    end
+    if moved then os.remove(POINTER_OLD) end
+    return moved == true
+end
+
+-- Puts the pointer naming `last` back in place from `back`, the copy of it a
+-- launch wrote before the new run took the pointer, with moves alone, so a
+-- full disk cannot stop it. Before 0.5.2's first run there was no pointer, so
+-- there is none again. True when done, and the copy is gone with it.
+local function put_back(back, last)
+    if last ~= "" then return commit_pointer(back) end
+    if os.remove(RUN_POINTER) or not exists(RUN_POINTER) then
+        os.remove(back)
+        return true
+    end
+    return false
+end
+
+-- Starts a run with files of its own, `marks` among them, and makes it the
+-- run the panel owns, the one the pointer names. Everything it needs written
+-- is written first, while the last run still owns everything, so a write that
+-- fails, as on a full disk, stops it there: its pointer, its marked frames,
+-- its command, and a copy of the pointer in place. Then its pointer goes in,
+-- before it starts, so a run that starts is always one a panel opened later
+-- can find: if it cannot go in, nothing starts. If the run then cannot start,
+-- the copy goes back in place, so a run Reset gave up on that finishes after
+-- all is still found. If even that fails, the copy stays, and the next panel
+-- to open puts it back. Nothing else of the last run changes until the new
+-- one is on its way. Then the last run's files go when `ended`, the look
+-- before it, showed that run had ended. One that may still be going keeps
+-- them, and they are the only files it can write to. Returns whether the run
+-- started, and if not, why.
+local function launch(ended, extra, marks)
+    local last = RUN_TAG
+    local tag
+    repeat
+        RUNS_STARTED = RUNS_STARTED + 1
+        tag = string.format("%d-%d-%s", os.time(), RUNS_STARTED,
+                            ((tostring({}):gsub("%W", "")):sub(-6)))
+    until not (exists(run_files(tag).status) or exists(run_files(tag).exit))
+    local files = run_files(tag)
+    -- `name` written whole with `body`, or nil. A write can look fine and
+    -- still fail as the file closes.
+    local function written(name, body)
+        local f = io.open(name, "w")
+        local wrote = f and f:write(body)
+        local closed = f and f:close()
+        if wrote and closed then return name end
+        os.remove(name)
+        return nil
+    end
+    -- Named for the run, so another panel starting one at the same time
+    -- never puts its tag in this one's place.
+    local new = written(RUN_POINTER .. ".new-" .. tag, tag)
+    if not new then return false, CANNOT_START end
+    if marks and #marks > 0 then
+        if not written(files.marks, table.concat(marks, ",")) then
+            os.remove(new)
+            return false, "Could not write the marked frames to " .. files.marks .. "."
+        end
+        extra = extra .. " --marks-file " .. shell_quote(files.marks)
+    end
+    local back = written(RUN_POINTER .. ".back-" .. tag, last)
+    use_run(tag)
+    local cmd = back and build_command("Stages.resolve_smooth", current_args(extra), true)
+    if not (cmd and commit_pointer(new)) then
+        use_run(last)
+        os.remove(new)
+        if back then os.remove(back) end
+        for _, path in pairs(files) do os.remove(path) end
+        return false, CANNOT_START
+    end
+    if not run_background(cmd) then
+        -- It never started, so the last run is the one the panel owns again,
+        -- here and, by moves alone, in the pointer.
+        use_run(last)
+        put_back(back, last)
+        for _, path in pairs(files) do os.remove(path) end
+        return false, CANNOT_START
+    end
+    os.remove(back)
+    if ended then
+        for _, path in pairs(run_files(last)) do os.remove(path) end
+    end
+    -- The new run is the one the panel owns, so the last one's needs go,
+    -- and a Stop sent to the last one says nothing of it.
+    view.recover = nil
+    view.stop_sent = nil
+    LAUNCHED_AT = os.time()
+    start_polling()
+    return true
 end
 
 -- ---------------------------------------------------------------------------
@@ -1800,12 +2468,28 @@ function win.On.Eternal2x.Close(ev)
     disp:ExitLoop()
 end
 
+-- Settings and Back only change the page. Every setting is saved as it
+-- changes, so leaving starts nothing. Focus goes to the button that leads
+-- back, for whoever moves through the panel with the keyboard.
+function win.On.SettingsBtn.Clicked(ev)
+    view.page = "settings"
+    show_what_matters()
+    pcall(function() items.BackBtn:SetFocus("OtherFocusReason") end)
+end
+
+function win.On.BackBtn.Clicked(ev)
+    view.page = "main"
+    show_what_matters()
+    pcall(function() items.SettingsBtn:SetFocus("OtherFocusReason") end)
+end
+
 -- Work on the clip under the playhead now, not the one there when the panel
 -- opened. If the playhead has moved off every clip, keep the last one.
 -- With quiet, as the timer calls it, a gap says nothing.
 function pick_source(quiet)
     if refresh_source(true) or SOURCE_PATH then return true end
-    if not quiet then set_status(items.SourceLabel.Text) end
+    -- An answer to a press shows, though the clip's line says it too.
+    if not quiet then set_status(items.SourceLabel.Text, true) end
     return false
 end
 
@@ -1818,20 +2502,28 @@ function win.On.AnalyseBtn.Clicked(ev)
         set_status(launch_problem())
         return
     end
+    local first, ended = last_run_first()
+    if first then return end
     if not pick_source() then return end
     -- Backgrounded like the render: analysis is quick on a short clip but can
     -- take tens of seconds on a long one, and Resolve must not freeze for it.
-    clear_status()
-    ANALYSING = true
+    local started, why = launch(ended, " --analyse")
+    if not started then
+        items.AnalysisLabel.Text = why
+        set_status(why)
+        return
+    end
+    offer_log(false)
+    RUN_KIND = "analysis"
     ANALYSED_ITEM = SOURCE_ITEM
     IMPORTED = false
     STAGE.name = nil
     set_busy(true)
     set_progress(0.01, "Starting")
-    set_status("Analysing...")
+    -- The analysis line first, so the status knows it would only repeat it.
     items.AnalysisLabel.Text = "Analysing..."
     items.AnalysisLabel.ToolTip = ""
-    start_run(current_args(" --analyse"))
+    set_status("Analysing...")
 end
 
 function win.On.SmoothBtn.Clicked(ev)
@@ -1843,6 +2535,8 @@ function win.On.SmoothBtn.Clicked(ev)
         set_status(launch_problem())
         return
     end
+    local first, ended = last_run_first()
+    if first then return end
     if not pick_source() then return end
     -- Read before anything starts. Rendering as if unmarked would throw away
     -- the frames the editor chose.
@@ -1851,31 +2545,24 @@ function win.On.SmoothBtn.Clicked(ev)
         set_status("Could not read the markers on the clip from Resolve, so nothing was rendered.")
         return
     end
-    if #marks > 0 then
-        -- A write can look fine and still fail as the file closes.
-        local f = io.open(MARKS_PATH, "w")
-        local wrote = f and f:write(table.concat(marks, ","))
-        local closed = f and f:close()
-        if not (wrote and closed) then
-            set_status("Could not write the marked frames to " .. MARKS_PATH .. ".")
-            return
-        end
+    local started, why = launch(ended, "", marks)
+    if not started then
+        set_status(why)
+        return
     end
-    clear_status()
+    offer_log(false)
     IMPORTED = false
-    ANALYSING = false
     STAGE.name = nil
     RUN_PLACE = SOURCE_PLACE
+    RUN_KIND = "render"
     LAST_ITEM = nil
     items.CompareBtn.Enabled = false
     set_busy(true)
     set_progress(0.01, "Starting")
     if #marks > 0 then
         set_status("Rendering the " .. #marks .. " marked frames.")
-        start_run(current_args(" --marks-file " .. shell_quote(MARKS_PATH)))
     else
         set_status("Rendering. No markers, so Upflow2x finds the drawings.")
-        start_run(current_args(""))
     end
 end
 
@@ -1896,8 +2583,11 @@ function win.On.CompareBtn.Clicked(ev)
     set_status(showing and "Showing the Upflow2x version." or "Showing the original.")
 end
 
+-- After a failed run it opens the log in a text editor instead. Finder hides
+-- a file whose name starts with a dot, so showing it there would find nothing.
 function win.On.FolderBtn.Clicked(ev)
-    if not LAST_OUTPUT then return end
+    local target = SHOW_LOG and LOG_PATH or LAST_OUTPUT
+    if not target then return end
     local cmd
     if is_windows() then
         if launch_problem() then
@@ -1908,19 +2598,24 @@ function win.On.FolderBtn.Clicked(ev)
         -- reports 1 even when it worked, so its answer is not checked. cmd
         -- expands %NAME% in a command line, so the path goes in a script,
         -- where doubling % keeps it literal, started as the render is.
+        -- Notepad goes through start, so the script ends without waiting on it.
         local f = io.open(REVEAL_SCRIPT, "wb")
         if not f then return end
-        local target = shell_quote((LAST_OUTPUT:gsub("/", "\\")))
-        f:write("@echo off\r\nchcp 65001 >nul\r\nexplorer /select,",
-                (target:gsub("%%", "%%%%")), "\r\n")
+        local quoted = shell_quote((target:gsub("/", "\\")))
+        f:write("@echo off\r\nchcp 65001 >nul\r\n",
+                SHOW_LOG and "start \"\" notepad " or "explorer /select,",
+                (quoted:gsub("%%", "%%%%")), "\r\n")
         f:close()
         local dir = (REPO_ROOT ~= "" and REPO_ROOT or root):gsub("/", "\\")
         cmd = "start \"Upflow2x\" /D " .. shell_quote(dir) .. " /MIN cmd /c .\\"
             .. basename(REVEAL_SCRIPT)
+    elseif SHOW_LOG then
+        local q = shell_quote(target)
+        cmd = "open -t " .. q .. " 2>/dev/null || xdg-open " .. q .. " >/dev/null 2>&1 &"
     else
-        local q = shell_quote(LAST_OUTPUT)
+        local q = shell_quote(target)
         cmd = "open -R " .. q .. " 2>/dev/null || xdg-open " ..
-              shell_quote(LAST_OUTPUT:match("^(.+)/") or ".") .. " >/dev/null 2>&1 &"
+              shell_quote(target:match("^(.+)/") or ".") .. " >/dev/null 2>&1 &"
     end
     print("[Upflow2x] " .. cmd)
     if is_windows() then
@@ -1932,34 +2627,85 @@ end
 
 function win.On.RefreshStatusBtn.Clicked(ev)
     -- A finished run's status is gone once handled, but the shell can still
-    -- write the exit code after it, so that alone is not a run to report on.
-    -- A run this panel started is polled even before Python reports, so one
-    -- that never started is caught.
-    if not read_status() and not RUNNING then
+    -- write the exit code after it, so that alone is not a run to report on:
+    -- a successful run leaves 0 behind. A run this panel started is polled
+    -- even before Python reports, so one that never started is caught, and
+    -- so is a failure no panel has shown, or a run Reset gave up on that
+    -- died after all, from only their exit code.
+    local exited = read_exit_code()
+    local unshown = (view.recover == "failed" or view.recover == "gave_up")
+        and exited ~= nil and exited ~= "0"
+    if not read_status() and not RUNNING and not unshown then
         -- Without a timer, this is also how the card catches up.
         pick_source(true)
-        set_status("No run in progress.")
+        set_status(view.recover == "gave_up" and "The run you reset has not finished."
+            or "No run in progress.")
         return
     end
     poll()
 end
 
 function win.On.CancelBtn.Clicked(ev)
-    if run_in_progress() then
-        -- The run sees this at its next frame, then reports Stopped.
+    -- One look decides, and nothing reads the run again to change its mind.
+    -- With two reads, a run that finished in between was taken for gone, and
+    -- its result was cleared before the import.
+    local offered = items.CancelBtn.Text
+    local state, st, exited = look()
+    if state == "live" and offered ~= "Stop" then
+        -- Pressed as Reset, for a run that went quiet and has reported again
+        -- since. That press only follows it again: only presses of a button
+        -- that says Stop end a run.
+        follow_again(st)
+        return
+    end
+    if state == "live" then
+        stop_unasked()
+        if not STOP_ASKED then
+            local prompt = "Press Stop again to end the run. "
+                .. "Stopping a render deletes the frames it has drawn so far."
+            if RUN_KIND == "analysis" then
+                prompt = "Press Stop again to end the analysis."
+            elseif RUN_KIND == "render" then
+                prompt = "Press Stop again to end the render. "
+                    .. "Stopping deletes the frames it has drawn so far."
+            end
+            STOP_ASKED = { at = os.time(), prompt = prompt, status = items.Status.Text }
+            items.CancelBtn.StyleSheet = LINK_ASKING
+            set_status(prompt)
+            return
+        end
+        -- The run sees this at its next frame, then reports Stopped. One
+        -- that finished since the look has nothing left to stop, and the
+        -- next poll handles its result.
         local f = io.open(STOP_PATH, "w")
         if f then f:close() end
+        -- Too late to stop, it may still land, and then without a sound.
+        if f then view.stop_sent = true end
         set_busy(true)
         start_polling()
         set_status(f and "Stopping..." or "Could not stop the run.")
         return
     end
-    clear_status()
-    ANALYSING = false
+    -- Gone with no exit code, the run may only have gone quiet, and may
+    -- still finish after a new run has taken its place.
+    local giving_up = state == "gone" and not exited and (st ~= nil or RUNNING)
+    if state == "gone" then st = claim_status() end
+    -- Found finished by a press of Stop or Reset: it lands with no sound.
+    if st and st.done and settle(st, true) then return end
+    -- The exit code stays: it shows the run has ended, so the next run can
+    -- clear its files. A run known to have ended, by its exit code or by a
+    -- result with nothing to keep, is marked as one whose end a panel dealt
+    -- with, so a panel opened later does not report it again. One that only
+    -- went quiet is not, as it may still finish, or fail and say why.
+    if exited or (st and st.done) then mark_seen() end
+    if exited then os.remove(STOP_PATH) end
+    -- A run given up on can still finish, so Refresh Progress stays to look.
+    view.recover = giving_up and "gave_up" or nil
     IMPORTED = false
     set_busy(false)
     set_progress(0, nil)
-    set_status("Ready.")
+    set_status(giving_up and RUN_KIND ~= "analysis" and "Ready. If the run you reset finishes after all, "
+        .. "its render is in the Save to folder." or "Ready.")
 end
 
 function win.On.ThresholdSlider.ValueChanged(ev)
@@ -1999,13 +2745,31 @@ end
 
 function win.On.UpscaleCB.Clicked(ev)
     DO_UPSCALE = items.UpscaleCB.Checked
+    show_modes()
     save_conf()
 end
 
 function win.On.InterpCB.Clicked(ev)
     DO_INTERPOLATE = items.InterpCB.Checked
+    show_modes()
     save_conf()
 end
+
+-- Render chime is saved the moment its tick changes. Toggled comes with every
+-- change: a click, Space, and Windows' accessibility Toggle, which sends no
+-- click. Clicked stays for a build that does not send Toggled. A click sends
+-- both, so it is saved only when it differs from what is saved. The state is
+-- the one the event gives, or without one, the box's own.
+local function chime_changed(ev)
+    local on = ev and ev.On
+    if type(on) ~= "boolean" then on = items.ChimeCB.Checked end
+    on = on == true or on == 1
+    if on == CHIME then return end
+    CHIME = on
+    save_conf()
+end
+win.On.ChimeCB.Toggled = chime_changed
+win.On.ChimeCB.Clicked = chime_changed
 
 local function run_update(auto_mode)
     if REPO_ROOT == "" then
@@ -2020,8 +2784,9 @@ local function run_update(auto_mode)
         if not auto_mode then set_status(launch_problem()) end
         return
     end
-    -- An update replaces the files a running render is using.
-    if run_in_progress() then
+    -- An update replaces the files a running render is using, or one still
+    -- loading them.
+    if (look()) == "live" then
         if not auto_mode then
             set_status("A render is still running. Check for updates once it finishes.")
         end
@@ -2058,28 +2823,65 @@ end
 win:Show()
 
 if REPO_ROOT == "" then
-    items.Meta.Text = "Plugin folder not configured."
+    set_meta("Plugin folder not configured.")
     set_status("Run Installer/install_upflow2x.py, then restart Resolve.")
 else
     refresh_source()
     start_polling()
     set_status(SOURCE_PATH and "Ready." or items.SourceLabel.Text)
-    local waiting = read_status()
-    if run_in_progress() then
-        -- Closed mid-run and reopened: follow that run, and import it when done.
-        set_busy(true)
-        start_polling()
-        set_status("A run started earlier is still going. Its progress shows here.")
-    elseif waiting and waiting.done and waiting.ok and waiting.import_path ~= "" then
+    -- A launch whose run could not start, and whose pointer could not go back,
+    -- left the copy of the last run's pointer beside it. A run that started
+    -- has a log by now, made as its shell began, or a status or exit code.
+    -- With none, the last run is the one the panel owns, and goes back in
+    -- place. With one, the copy is only left over.
+    if RUN_TAG ~= "" then
+        local back = RUN_POINTER .. ".back-" .. RUN_TAG
+        local before = read_file(back)
+        local files = run_files(RUN_TAG)
+        if before and not (exists(files.log) or exists(files.status) or exists(files.exit)) then
+            before = before:match("^%s*([%w%-]*)")
+            put_back(back, before)
+            use_run(before)
+        elseif before then
+            os.remove(back)
+        end
+    end
+    -- One look at the run the panel owns, as an earlier panel left it.
+    local state, waiting, exited = look()
+    local failed = exited ~= nil and exited ~= "0"
+    if state == "live" then
+        -- Closed mid-run and reopened: follow that run, and import it when
+        -- done, even one still loading before its first status.
+        follow_again(waiting, "A run started earlier is still going. Its progress shows here.")
+    elseif state == "finished" and waiting.ok and waiting.import_path ~= "" then
         -- It finished after its panel closed, so nothing has imported it, and
         -- the next run would delete its status unseen.
         LAST_OUTPUT = render_location(waiting)
         items.FolderBtn.Enabled = LAST_OUTPUT ~= nil
-        set_status("A render finished while the panel was closed. "
-            .. "Press Refresh Progress to add it to the timeline.")
-    elseif AUTO_UPDATE then
-        run_update(true)
+        view.recover = "pending"
+        set_status(WAITING)
+    else
+        local seen = end_shown()
+        if not seen and ((state == "finished" and not waiting.ok and waiting.message ~= "Stopped.")
+                or (state == "gone" and failed)) then
+            -- It failed after its panel closed. A successful run leaves exit
+            -- code 0 behind, which is no failure, and a run whose end a panel
+            -- showed, a Stop or a failure, leaves its own, seen.
+            view.recover = "failed"
+            set_status("The last run did not finish. Press Refresh Progress to see why.")
+        elseif state == "gone" and waiting and not exited then
+            -- Quiet too long, with no exit code to say it ended.
+            view.recover = "stale"
+            set_status("A run started earlier stopped reporting. Press Reset to clear it.")
+        end
+        if AUTO_UPDATE then run_update(true) end
     end
 end
 
+-- Shown, the window is given its size once, whatever it came up at, and
+-- with a timer once more on the first tick, by when Qt has laid it out.
+fit_window()
+
+-- Ticks can only arrive from here on.
+view.since = os.time()
 disp:RunLoop()

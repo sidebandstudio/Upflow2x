@@ -8,18 +8,25 @@
     <link rel="canonical" href="https://upflow2x.com/help.html">
     <meta name="theme-color" content="#101013">
     <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Upflow2x">
     <meta property="og:url" content="https://upflow2x.com/help.html">
     <meta property="og:title" content="Upflow2x help">
     <meta property="og:description" content="Install guides, the panel's settings, and fixes for the messages it can show.">
-    <meta property="og:image" content="https://upflow2x.com/assets/og.jpg">
+    <meta property="og:image" content="https://upflow2x.com/assets/social-preview.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+    <meta property="og:image:alt" content="Upflow2x. Upscale and smooth anime in Resolve. Above, a bouncing ball as drawn on 2s, each drawing held for two frames. Below, the same bounce from Upflow2x, with an amber in-between drawn in place of each held frame.">
     <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="https://upflow2x.com/assets/social-preview.png">
+    <meta name="twitter:image:alt" content="Upflow2x. Upscale and smooth anime in Resolve. Above, a bouncing ball as drawn on 2s, each drawing held for two frames. Below, the same bounce from Upflow2x, with an amber in-between drawn in place of each held frame.">
     <link rel="icon" href="assets/icon.svg?v=20261027d" type="image/svg+xml">
     <link rel="icon" href="assets/favicon.png?v=20261027d" type="image/png" sizes="32x32">
     <link rel="apple-touch-icon" href="assets/apple-touch-icon.png?v=20261027d">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/site.css?v=20261027o">
+    <link rel="stylesheet" href="css/site.css?v=20261123a">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -74,6 +81,7 @@
                     <li>
                         <h3>Click Install</h3>
                         <p>Keep your internet connection on and wait for setup to finish. It installs its own Python and puts Upflow2x in DaVinci Resolve's own folder, <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code>. You do not need to install Python yourself or use a terminal. The downloaded installer can be deleted afterwards.</p>
+                        <p>Setup v0.5.2 names each package under the bar as it installs it. Setup v0.5.1 shows no progress at that step for a minute or two, which is normal. If setup can't finish, it says why in red. Fix that and press Try Again, a button setup v0.5.1 still labels Install.</p>
                     </li>
                     <li>
                         <h3>Open it in Resolve</h3>
@@ -95,7 +103,9 @@
                     <li>
                         <h3>Open setup and click Install</h3>
                         <p>Double-click the zip, open <code>Upflow2xInstaller.app</code>, then click Install. Keep your internet connection on while it runs. The same app works on Apple Silicon and Intel. Setup installs its own Python and stores Upflow2x in DaVinci Resolve's own folder, <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code>.</p>
+                        <p>Setup v0.5.2 names each package under the bar as it installs it. Setup v0.5.1 shows no progress at that step for a minute or two, which is normal. If setup can't finish, it says why in red. Fix that and press Try Again, a button setup v0.5.1 still labels Install.</p>
                         <p>If macOS says it can't check the app for malware, click Done, open System Settings, Privacy &amp; Security, scroll down and click Open Anyway, then confirm. On macOS 12 it's System Preferences, Security &amp; Privacy. Apple hasn't checked setup yet, so macOS asks this once.</p>
+                        <p>If setup stops at Downloading Python with <code>CERTIFICATE_VERIFY_FAILED</code>, <a href="#mac-certificate">start it from Terminal</a>.</p>
                     </li>
                     <li>
                         <h3>Open it in Resolve</h3>
@@ -120,42 +130,41 @@
 
             <section id="usage" aria-labelledby="usage-title">
                 <h2 id="usage-title">Using the panel</h2>
-                <p class="sub">Analyse marks the drawings. Check the markers, then render.</p>
+                <p class="sub">Put the playhead on a clip and press Render. Analyse and markers are optional.</p>
                 <ol class="os-steps">
                     <li>
                         <h3>Put the playhead on a clip</h3>
-                        <p>Move the playhead over the clip on your timeline, then open the panel. It shows the clip it picked up and the part of the file the clip uses. It follows the playhead as you move it, and if the playhead sits in a gap, it keeps the last clip.</p>
-                    </li>
-                    <li>
-                        <h3>Analyse</h3>
-                        <p>Press <strong>Analyse</strong>. Upflow2x reads the clip and reports what it found, for example <code>1438 frames, 719 unique drawings (719 held, 50%). Animated on 2s.</code> It also puts a marker on the clip at every drawing, replacing only the markers it placed before. A pose held for more than twice the clip's pattern is a pause. It gets a second marker just before the next drawing, so it stays still and then moves on at the clip's pace. If a clip has no duplicated frames, it says so and places none.</p>
-                    </li>
-                    <li>
-                        <h3>Check the markers</h3>
-                        <p>If Analyse marked too many or too few, move <strong>Threshold</strong> and analyse again. That replaces only its own markers, never yours, and puts back any of its markers you deleted. Then delete a marker to leave its frame out, even if it moved, or select the clip and press <kbd>M</kbd> to mark a frame Analyse missed.</p>
-                        <p>Every marker on the clip counts, whatever its colour, and the clip's first frame always does. Markers on the timeline's ruler don't, so beat markers are safe there. You can skip Analyse and mark the frames yourself.</p>
+                        <p>Move the playhead over the clip on your timeline, then open the panel. It shows the clip it picked up. It follows the playhead as you move it, and if the playhead sits in a gap, it keeps the last clip.</p>
                     </li>
                     <li>
                         <h3>Render</h3>
-                        <p>Press <strong>Render</strong>. It keeps every marked frame as drawn and draws every frame between two markers fresh, so a part you leave unmarked never counts. With Interpolate on, the render ends on the last marker, so mark the last drawing you want in it. A clip with no markers at all is rendered from the drawings Upflow2x finds on its own. The render runs in the background with a progress bar and the time left, and Resolve stays usable. <strong>Stop</strong> ends it early. The first time, it installs the AI runtime and downloads the model, about 50 MB in all, so the bar can sit at 0% for a minute or two.</p>
-                        <p>When it's done, the result is imported, at 2x if Upscaling is on, and placed above the original, starting on the same frame, at the same frame rate with three frames for every one of the clip's, up to the last marker if it has any, so it plays at a third of the speed, ready to time remap. With Interpolate off it keeps the clip's length. It goes on the lowest track that is empty there, or a new track named Upflow2x, so none of your clips get covered. Only the part of the file you trimmed to is rebuilt.</p>
+                        <p>Turn <strong>Upscaling</strong> and <strong>Interpolate</strong> on or off, then press <strong>Render</strong>. On a clip with no markers, Upflow2x finds the drawings itself. The render runs in the background with a progress bar and the time left, and Resolve stays usable. <strong>Stop</strong> ends it early and deletes the frames drawn so far. From 0.5.2 it takes a second press within five seconds, during Analyse too. In 0.5.1 one press stops it. The first time, it installs the AI runtime and downloads the model, about 50 MB in all, so the bar can sit at 0% for a minute or two.</p>
+                        <p>When it's done, the result is imported, at 2x if Upscaling is on, and placed above the original, starting on the same frame, at the same frame rate with three frames for every one of the clip's, up to the last marker if it has any, so it plays at a third of the speed, ready to time remap. With Interpolate off it keeps the clip's length. It goes on the lowest track that is empty there, or a new track named Upflow2x, so none of your clips get covered. Only the part of the file you trimmed to is rebuilt, or the whole file if Resolve doesn't report that part.</p>
                         <p>If another timeline is open when it finishes, or the original was deleted or retrimmed, it goes at the end of the timeline instead. An image sequence whose frame rate Resolve won't set stays in the media pool, since it would play at the wrong speed.</p>
                     </li>
                     <li>
                         <h3>Compare</h3>
-                        <p><strong>Show Original</strong> switches the smoothed clip off so the original shows through, and Show Upflow2x switches it back. It only works on an upscale with Interpolate off, since a slowed render has no original to line up with. <strong>Show in Folder</strong> opens where the render was saved, as <a href="#folder">Where renders go</a> explains.</p>
+                        <p><strong>Show Original</strong> switches the smoothed clip off so the original shows through, and Show Upflow2x switches it back. It only works on an upscale with Interpolate off, since a slowed render has no original to line up with. <strong>Show in Folder</strong> opens where the render was saved, as <a href="#folder">Where renders go</a> explains. From 0.5.2, if a failed run wrote to its log, the same button reads <strong>Open Log</strong> and opens that log in Notepad on Windows or a text editor on a Mac, ready to read or send to us.</p>
                     </li>
                 </ol>
+                <h3 id="markers">Choose the frames yourself</h3>
+                <p>Optional. In 0.5.2, Analyse and Threshold are in <strong>Settings</strong>. In 0.5.1 they're on the main panel.</p>
+                <p>Press <strong>Analyse</strong>. Upflow2x reads the clip and reports what it found, for example <code>1438 frames, 719 unique drawings (719 held, 50%). Animated on 2s.</code> It also puts a marker on the clip at every drawing, replacing only the markers it placed before. A pose held for more than twice the clip's pattern is a pause. It gets a second marker just before the next drawing, so it stays still and then moves on at the clip's pace. If a clip has no duplicated frames, it says so and places none.</p>
+                <p>If Analyse marked too many or too few, move <strong>Threshold</strong> and analyse again. That replaces only its own markers, never yours, and puts back any of its markers you deleted. Then delete a marker to leave its frame out, even if it moved, or select the clip and press <kbd>M</kbd> to mark a frame Analyse missed.</p>
+                <p>Every marker on the clip counts, whatever its colour, and the clip's first frame always does. Markers on the timeline's ruler don't, so beat markers are safe there. You can skip Analyse and mark the frames yourself.</p>
+                <p>Render keeps every marked frame as drawn and draws every frame between two markers fresh, so a part you leave unmarked never counts. With Interpolate on, the render ends on the last marker, so mark the last drawing you want in it.</p>
             </section>
 
             <section id="settings" aria-labelledby="settings-title">
                 <h2 id="settings-title">Settings</h2>
-                <p class="sub">They are all on the panel, and it remembers them between sessions. Rest the pointer on one to see what it does.</p>
+                <p class="sub">Upscaling and Interpolate are on the main panel. In 0.5.2, <strong>Settings</strong> opens Analyse and Threshold, Output and Save to, Render chime, and Check for Updates, and <strong>Back</strong> returns to the main panel. 0.5.1 has no Render chime and keeps the others on its main panel. The panel remembers each choice between sessions, with nothing to save. Rest the pointer on one to see what it does.</p>
                 <dl class="settings">
-                    <div><dt>Threshold</dt><dd>How big a change Analyse counts as a new drawing, 1 to 9. Lower catches small moves, like only a mouth or a slow drift. Higher counts only big ones, like the whole shot moving. It does nothing to frames you've marked.</dd></div>
-                    <div><dt>Output</dt><dd><code>Image sequence</code> is lossless and imports most reliably. <code>MP4</code> is one compact file but lossy. <code>MKV</code> is one lossless file. All three are 8-bit RGB, so transparency and 10-bit colour aren't kept. MP4 and MKV need an even width and height.</dd></div>
                     <div><dt>Upscaling</dt><dd>Upscales each drawing 2x with Real-ESRGAN's anime video model, on the GPU through DirectML, then draws the in-betweens at 2x from the upscaled drawings, so the model runs once a drawing rather than once a frame. The model comes with Upflow2x. Without a GPU, on a Mac for one, Resolve's Super Scale is applied to the imported clip instead. Either way it only shows on a timeline bigger than the clip, such as 3840x2160 for 1080p footage. As an image sequence, a 4K frame is about 6 MB.</dd></div>
                     <div><dt>Interpolate</dt><dd>On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, and falls back to the CPU, which is about ten times slower. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off, every drawing comes back on its own frame with nothing new drawn, at the clip's length. With Upscaling on, that only upscales.</dd></div>
+                    <div><dt>Threshold</dt><dd>How big a change Analyse counts as a new drawing, 1 to 9. Lower catches small moves, like only a mouth or a slow drift. Higher counts only big ones, like the whole shot moving. It does nothing to frames you've marked.</dd></div>
+                    <div><dt>Output</dt><dd><code>Image sequence</code> is lossless and imports most reliably. <code>MP4</code> is one compact file but lossy. <code>MKV</code> is one lossless file. All three are 8-bit RGB, so transparency and 10-bit colour aren't kept. MP4 and MKV need an even width and height.</dd></div>
+                    <div><dt>Save to</dt><dd>A folder beside the project's cache, or one you choose. <a href="#folder">Where renders go</a> has the details.</dd></div>
+                    <div><dt>Render chime</dt><dd>New in 0.5.2, in Settings and off until you turn it on. It plays once, after the render is added to the timeline, and not when the render stays in the media pool. It never adds sound to the clip or to an export.</dd></div>
                 </dl>
             </section>
 
@@ -169,7 +178,7 @@
                 <p>Renders go in an <code>Upflow2x</code> folder beside your project's cache folder, with a folder for each project. The cache folder is the Cache files location in Project Settings, Master Settings, Working Folders. With the cache in <code>D:\Resolve\CacheClip</code>, a project called Episode 1 renders to <code>D:\Resolve\Upflow2x\Episode 1</code>.</p>
                 <p>If the project has no cache folder, its drive is unplugged or read only, or it is in OneDrive, renders go in Resolve's own folder instead, again a folder for each project: <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x\Renders</code> on Windows, or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x/Renders</code> on a Mac. <strong>Show in Folder</strong> opens it. Up to v0.5.0 each render was saved beside its clip, and those stay where they are.</p>
                 <p>A render you stop, or one that fails, is deleted, since it never goes into Resolve. A finished one is never deleted, because your timeline uses it.</p>
-                <p>To keep renders somewhere else, like a drive with more space, open <strong>Save to</strong> under Output and pick <strong>Choose a folder...</strong>. Renders then go there, still a folder for each project, until you pick <strong>Resolve's folder</strong> again. If that folder can't be written to, for example because its drive is unplugged, the render stops and says so.</p>
+                <p>To keep renders somewhere else, like a drive with more space, open <strong>Save to</strong>, in Settings from 0.5.2, and pick <strong>Choose a folder...</strong>. Renders then go there, still a folder for each project, until you pick <strong>Resolve's folder</strong> again. If that folder can't be written to, for example because its drive is unplugged, the render stops and says so.</p>
                 <p>A 4K image sequence takes about 6 MB a frame, so a few seconds of footage can fill a gigabyte. Upflow2x never deletes a finished render. Delete a project's folder once its renders are off your timelines.</p>
                 <h3>Nothing was smoothed</h3>
                 <p>The first render installs the network's runtime and downloads its model, so it needs a connection once. Without one, every drawing is kept as drawn rather than filled in some other way, since warping pixels doubles lines on drawn animation. The status says why. Render again once you're online.</p>
@@ -177,8 +186,16 @@
 
             <section id="troubleshooting" aria-labelledby="troubleshooting-title">
                 <h2 id="troubleshooting-title">Troubleshooting</h2>
-                <p class="sub">Find the message the panel showed you.</p>
+                <p class="sub">Find the message setup or the panel showed you.</p>
                 <div class="faq">
+                    <details id="mac-certificate">
+                        <summary>Mac setup stops at "Downloading Python" with CERTIFICATE_VERIFY_FAILED</summary>
+                        <div class="answer">
+                            <p>Setup v0.5.1 reads web certificates from a folder that only python.org's Python 3.13 fills, so on other Macs it can't check the Python it downloads and stops. Quit setup, open Terminal, and start it with the certificates every Mac has:</p>
+                            <div class="code"><code>SSL_CERT_FILE=/etc/ssl/cert.pem ~/Downloads/Upflow2xInstaller.app/Contents/MacOS/Upflow2xInstaller</code></div>
+                            <p>If the app isn't in Downloads, change that part of the command to where it is. Click Install in the window that opens, and leave Terminal open until setup finishes.</p>
+                        </div>
+                    </details>
                     <details>
                         <summary>The plugin doesn't appear in Resolve</summary>
                         <div class="answer">
@@ -229,8 +246,14 @@
                     <details>
                         <summary>Progress seems stuck</summary>
                         <div class="answer">
-                            <p>Press Refresh Progress. If the panel says Python hasn't started, or that there's been no progress for a few minutes, the run stopped. Press Reset and run it again.</p>
-                            <p>For anything else, email us the panel's status text and the <code>.upflow2x_last_run.log</code> file from the plugin folder. Setup puts it in <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code> on Windows or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code> on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in.</p>
+                            <p>Press Refresh Progress. If the panel still shows no progress, press Reset to try again. In 0.5.2, if the old render finishes after you start another one, its files stay in the old run's Save to folder. You can import them manually.</p>
+                            <p>For anything else, send the panel's status text, including any exit code. In 0.5.2, use <strong>Open Log</strong> to find the log for that run, if it wrote one. Its name matches <code>.upflow2x_run-*.log</code>. In 0.5.1, look for <code>.upflow2x_last_run.log</code>. The plugin folder is <code>%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x</code> on Windows or <code>~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x</code> on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in.</p>
+                        </div>
+                    </details>
+                    <details>
+                        <summary>"Stopped without finishing"</summary>
+                        <div class="answer">
+                            <p>Python ended before the run finished. If it wrote a log, the panel shows its last line. In 0.5.2, press <strong>Open Log</strong> to read the rest. In 0.5.1, use the path at the end of the message. If you need help, send us the log. If Python left no log, send the exit code from the panel instead.</p>
                         </div>
                     </details>
                     <details>
@@ -266,10 +289,20 @@
                 <h3>Automatically</h3>
                 <p>Each time the panel opens, Upflow2x checks for a new version. If there is one, it downloads it, checks it against its checksum and applies it. Restart Resolve afterwards to load it.</p>
                 <h3>When you ask</h3>
-                <p>Press <strong>Check for Updates</strong> at any time. If nothing changed, it says so and leaves your install alone. A failed check never stops you working, and an update that can't finish is undone, so you keep the version you had.</p>
+                <p>Press <strong>Check for Updates</strong> at any time. From 0.5.2 it's in Settings. If nothing changed, it says so and leaves your install alone. A failed check never stops you working, and an update that can't finish is undone, so you keep the version you had.</p>
                 <div class="callout">
                     <p><strong>Run the installer again</strong> once if you're updating from 0.3.1 or earlier. Those versions put the panel where Resolve lists it only on the Fusion page, or on Windows not at all. After that, you only need it if a manually installed plugin folder moves.</p>
                 </div>
+                <h3 id="changes-0-5-2">Changes in 0.5.2</h3>
+                <p>The <a href="download.html">download page</a> shows the latest public version. In 0.5.2:</p>
+                <ul class="changes">
+                    <li>The main panel keeps the clip, Upscaling, Interpolate and Render. <strong>Settings</strong> holds the rest, and <strong>Back</strong> returns.</li>
+                    <li>Mac setup checks its Python download with the certificates macOS ships, so it no longer stops with <code>CERTIFICATE_VERIFY_FAILED</code>.</li>
+                    <li><strong>Stop</strong> takes a second press within five seconds, since stopping deletes the frames drawn so far.</li>
+                    <li>If a failed run wrote to its log, <strong>Open Log</strong> opens it.</li>
+                    <li>Setup names each package as it installs it, offers Try Again when it can't finish, and asks before you quit it partway.</li>
+                </ul>
+                <p>An update brings the panel changes to an existing install. The setup changes need setup v0.5.2 itself.</p>
             </section>
 
         </div>
@@ -290,6 +323,6 @@
     </div>
 </footer>
 
-<script src="js/site.js?v=20261028b"></script>
+<script src="js/site.js?v=20261123a"></script>
 </body>
 </html>

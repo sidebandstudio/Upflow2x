@@ -84,7 +84,11 @@ at the top of the panel shows them again.
    **More info**, then **Run anyway**. If macOS says it can't check the app,
    open System Settings → Privacy & Security and click **Open Anyway**.
 2. Click **Install** and wait for setup to finish. No separate Python download
-   or terminal commands are needed.
+   or terminal commands are needed. Setup v0.5.2 names each package under the
+   bar as it installs it. Setup v0.5.1 shows no progress at that step for a
+   minute or two, which is normal. If setup can't finish, it says why in red.
+   Fix that and press **Try Again**, a button setup v0.5.1 still labels
+   **Install**.
 3. Setup stores the plugin and its private Python in DaVinci Resolve's own
    folder, `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or
    `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. The
@@ -131,30 +135,18 @@ re-run the installer if you move it.
    playhead. The panel follows the playhead, and in a gap it keeps the
    last clip.
 2. Open **Workspace → Scripts → Upflow2x**.
-3. Click **Analyse**. It reads the clip, tells you what it found, for
-   example `1438 frames, 719 unique drawings (719 held, 50%). Animated on 2s.`,
-   and puts a marker on the clip at every drawing. A pose held for more than
-   twice the clip's pattern is a pause. It gets a second marker just before
-   the next drawing, so it stays still and then moves on at the clip's pace.
-4. Check the markers. If Analyse marked too many or too few, move **Threshold**
-   and analyse again. That replaces only its own markers, never yours, and
-   puts back any of its markers you deleted. Then delete a marker to leave its
-   frame out, even if it moved, or select the clip and press **M** to mark a
-   frame Analyse missed.
-5. Click **Render**.
+3. Turn **Upscaling** and **Interpolate** on or off, then click **Render**.
+   On a clip with no markers, Upflow2x finds the drawings itself.
 
-Render keeps every marked frame as drawn and draws every frame between two
-markers fresh, so a part you leave unmarked never counts. With Interpolate on,
-the render ends on the last marker, so mark the last drawing you want in it. Every marker on the
-clip counts, whatever its colour, and the clip's first frame always does.
-Markers on the timeline's ruler do not, so beat markers are safe there. You can
-skip Analyse and mark the frames yourself. A clip with no markers at all is
-rendered from the drawings Upflow2x finds on its own.
+Marking frames is optional, see
+[Choose the frames yourself](#choose-the-frames-yourself).
 
 ![The Upflow2x panel open in DaVinci Resolve Studio, with Hero walk.mp4 on V1 and its render on V2.](https://upflow2x.com/assets/demo/resolve.jpg)
 
 The render runs in the background and the panel shows progress and the time
-left, so Resolve stays usable while it works. **Stop** ends it early. When it finishes, the rebuilt
+left, so Resolve stays usable while it works. **Stop** ends it early and
+deletes the frames drawn so far. From 0.5.2 it takes a second press within
+five seconds, during Analyse too. In 0.5.1 one press stops it. When it finishes, the rebuilt
 clip is imported and placed on the track above the original, starting on the
 same frame. With Interpolate on it runs three times as long, up to the last
 marker if the clip has any. It goes on the lowest
@@ -171,7 +163,9 @@ Then:
   through, and **Show Upflow2x** switches it back. Scrub or play to compare.
   It only works on an upscale with Interpolate off. A slowed render has no
   original to line up with.
-- **Show in Folder** opens the render's location.
+- **Show in Folder** opens the render's location. From 0.5.2, after a run
+  fails and writes to its log, the same button reads **Open Log** and opens that
+  log in Notepad on Windows or a text editor on a Mac.
 
 Renders go in an `Upflow2x` folder beside the project's cache folder, with a
 folder for each project. The cache folder is the Cache files location in
@@ -187,8 +181,8 @@ clip, and those stay where they are. A render you stop, or one that fails, is
 deleted, since it never goes into Resolve. A finished one is never deleted,
 because your timeline uses it.
 
-To keep renders somewhere else, like a drive with more space, open **Save to**
-under Output and pick **Choose a folder...**. Renders then go there, still a
+To keep renders somewhere else, like a drive with more space, open **Save to**,
+in Settings from 0.5.2, and pick **Choose a folder...**. Renders then go there, still a
 folder for each project, until you pick **Resolve's folder** again. If that
 folder can't be written to, for example because its drive is unplugged, the
 render stops and says so.
@@ -198,24 +192,50 @@ fill a gigabyte. Upflow2x never deletes a finished render, so delete a
 project's folder once its renders are off your timelines.
 
 Only the part of the file the timeline clip uses is analysed and rebuilt. To
-reach it, the file is still decoded from its start, once for Analyse and again
-for the render, so a short cut late in a long episode shows Seeking for a
-while first. The panel shows the range it will use under the clip's name, or
-Whole file when Resolve does not report one.
+reach it, the file is still decoded from its start, once for Analyse if you run
+it and again for the render, so a short cut late in a long episode shows
+Seeking for a while first. If Resolve does not report which part the clip
+uses, the whole file is analysed and rebuilt.
+
+### Choose the frames yourself
+
+Optional. In 0.5.2, Analyse and Threshold are in **Settings**. In 0.5.1
+they're on the main panel.
+
+1. Click **Analyse**. It reads the clip, tells you what it found, for
+   example `1438 frames, 719 unique drawings (719 held, 50%). Animated on 2s.`,
+   and puts a marker on the clip at every drawing. A pose held for more than
+   twice the clip's pattern is a pause. It gets a second marker just before
+   the next drawing, so it stays still and then moves on at the clip's pace.
+2. Check the markers. If Analyse marked too many or too few, move **Threshold**
+   and analyse again. That replaces only its own markers, never yours, and
+   puts back any of its markers you deleted. Then delete a marker to leave its
+   frame out, even if it moved, or select the clip and press **M** to mark a
+   frame Analyse missed.
+3. Click **Render**.
+
+Render keeps every marked frame as drawn and draws every frame between two
+markers fresh, so a part you leave unmarked never counts. With Interpolate on,
+the render ends on the last marker, so mark the last drawing you want in it. Every marker on the
+clip counts, whatever its colour, and the clip's first frame always does.
+Markers on the timeline's ruler do not, so beat markers are safe there. You can
+skip Analyse and mark the frames yourself.
 
 ### Settings
 
-They are all on the panel, and it remembers them between sessions. Rest the
-pointer on one to see what it does.
+Upscaling and Interpolate are on the main panel. In 0.5.2, **Settings** opens
+Analyse and Threshold, Output and Save to, Render chime, and Check for
+Updates, and **Back** returns to the main panel. 0.5.1 has no Render chime and
+keeps the others on its main panel. The panel remembers each choice between
+sessions, with nothing to save. Rest the pointer on one to see what it does.
 
 | Setting | What it does |
 |---|---|
-| **Threshold** | How big a change Analyse counts as a new drawing, 1 to 9. Lower catches small moves, like only a mouth or a slow drift. Higher counts only big ones, like the whole shot moving. It does nothing to frames you have marked. |
-| **Output** | `Image sequence` is lossless and the most reliable to import. `MP4` is a single compact file but lossy. `MKV` is a lossless single file. All three are 8-bit RGB: transparency and 10-bit colour in the source are not kept. MP4 and MKV need an even width and height. |
 | **Upscaling** | Upscales each drawing 2x with Real-ESRGAN's anime video model, on the GPU through DirectML. The in-betweens are then drawn at 2x from the upscaled drawings, so the model runs once a drawing rather than once a frame. The model ships with Upflow2x. Without a GPU, on a Mac for one, Resolve's Super Scale is applied to the imported clip instead. Either way it only shows on a timeline bigger than the clip, such as 3840x2160 for 1080p footage. A 2x render has four times the pixels. As an image sequence, a 4K frame of anime is about 6 MB, four to five times its 1080p size. |
 | **Interpolate** | On, the RIFE network draws every missing in-between. On Windows it runs on the GPU through DirectML, and falls back to the CPU, about ten times slower. If its Python already has ONNX Runtime without DirectML, that one is used, on the CPU. Its first run installs ONNX Runtime and downloads the model, about 50 MB in all, so it needs a connection once; without one, every drawing is kept as drawn and the panel says why. On, the render is three times longer, so it takes three times as long to render and an image sequence takes three times the disk. Off skips the in-betweens, so every drawing comes back on its original frame and the render keeps the clip's length. With Upscaling on, that only upscales. |
-
-Settings are remembered between sessions.
+| **Threshold** | How big a change Analyse counts as a new drawing, 1 to 9. Lower catches small moves, like only a mouth or a slow drift. Higher counts only big ones, like the whole shot moving. It does nothing to frames you have marked. |
+| **Output** | `Image sequence` is lossless and the most reliable to import. `MP4` is a single compact file but lossy. `MKV` is a lossless single file. All three are 8-bit RGB: transparency and 10-bit colour in the source are not kept. MP4 and MKV need an even width and height. |
+| **Render chime** | New in 0.5.2, in Settings and off until you turn it on. It plays once, after the render is added to the timeline, and not when the render stays in the media pool. It never adds sound to the clip or to an export. |
 
 ### What it will not do
 
@@ -258,7 +278,7 @@ progress goes to stderr.
 ## Updates
 
 Upflow2x checks for updates at startup, or on demand with the
-**Check for Updates** button. Updates are verified against a SHA-256 checksum
+**Check for Updates** button, in Settings from 0.5.2. Updates are verified against a SHA-256 checksum
 and checked for every file the plugin needs before being applied. If an
 update fails partway, the files it replaced are put back. Restart Resolve
 afterwards.
@@ -267,6 +287,7 @@ afterwards.
 
 | Problem | Fix |
 |---|---|
+| Mac setup stops at "Downloading Python" with `CERTIFICATE_VERIFY_FAILED` | Setup v0.5.1 reads web certificates from a folder that only python.org's Python 3.13 fills. Quit setup and start it from Terminal with the certificates every Mac has: `SSL_CERT_FILE=/etc/ssl/cert.pem ~/Downloads/Upflow2xInstaller.app/Contents/MacOS/Upflow2xInstaller`, changing the path if the app isn't in Downloads. Leave Terminal open until setup finishes. |
 | Resolve says you need Studio | Since 19.1 the free edition blocks script panels. Upflow2x needs Studio. |
 | Clicking Upflow2x does nothing, or "Plugin folder not configured" | The plugin folder moved or was deleted after installing, and Workspace → Console says `UI script not found`. Run the installer again. After a manual install, re-run `python Installer/install_upflow2x.py` from where the folder is now. |
 | "Could not reach Resolve" | Open the panel from Workspace → Scripts, not from a terminal. |
@@ -275,10 +296,10 @@ afterwards.
 | "Every frame differs, but the differences look like grain" | Mark the drawings with M, then press **Render**. From the command line, `--grain` raises the threshold above the grain. |
 | "...has a variable frame rate" | Render the clip to a constant frame rate first, from Resolve or with ffmpeg, as the message says. |
 | Rendering is slow | The time grows with the length of the clip on your timeline, and only the part it uses is rebuilt, so trimming helps. On a Radeon RX 7900 XT, under three seconds of 1080p, upscaled and slowed to 190 frames at 4K, takes about 33 seconds. Without a GPU the in-betweens are drawn on the CPU, about ten times slower, and Super Scale upscales. |
-| Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel says so and shows its last error. If a run was interrupted, press **Reset**. |
+| Progress seems stuck | Press **Refresh Progress**. If Python stopped, the panel shows its last error or exit code. From 0.5.2, **Open Log** appears if the failed run wrote to its log. If progress stops, press **Reset** to try again. In 0.5.2, if the old render finishes after you start another one, you can import it from the old run's **Save to** folder. |
 | Resolve would not import the render | The render still finished. The panel prints where it is, so drag it into your media pool. Switching Output to `Image sequence` usually avoids this. |
 | Upscale skipped | Without a GPU the upscale is Super Scale, which needs Resolve Studio. |
-| Something else | Email the panel's status text and the `.upflow2x_last_run.log` file from the plugin folder. Setup puts it in `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in. |
+| Something else | Send the panel's status text, including any exit code. In 0.5.2, use **Open Log** to find the log for that run, if it wrote one. Its name matches `.upflow2x_run-*.log`. In 0.5.1, look for `.upflow2x_last_run.log`. The plugin folder is `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Upflow2x` on Windows or `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Upflow2x` on a Mac. A manual install, or one updated from 0.5.0 or earlier, keeps the folder it was installed in. |
 
 ## Development
 
