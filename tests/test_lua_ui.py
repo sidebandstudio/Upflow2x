@@ -4914,6 +4914,32 @@ def test_an_analysis_that_reports_again_after_reset_still_marks_its_clip(lua, di
     assert H.status() == "Check the markers, then press Render."
 
 
+@pytest.mark.parametrize("action", ["RefreshStatusBtn", "AnalyseBtn", "SmoothBtn"])
+def test_finished_analysis_after_reset_marks_the_original_before_another_run(lua, direct, action):
+    H = _stacked(lua, direct, "/r/shot_smooth/frame_[000000-000047].png", "/media/shot.mov")
+    stall_then_reset_an_analysis(H, direct)
+    H.next_clip("/media/other.mov", "other", 90000, 24)
+    follow(H)
+    assert "other.mov" in H.text_of("SourceLabel")
+    launches = H.command_count()
+    write_status(direct, done=True, ok=True, marks="0,2", message="Animated on 2s.")
+    if action == "SmoothBtn":
+        press(H, "BackBtn")
+    press(H, action)
+    assert H.status() == "Check the markers, then press Render."
+    assert H.command_count() == launches
+    original = H.under_markers[1]
+    assert original[0].customData == original[2].customData == "eternal2x"
+    assert H.tagged_markers() == 0
+    assert run_file(direct, "status").read_bytes() == b""
+    if action == "SmoothBtn":
+        press(H, "SettingsBtn")
+    press(H, "RefreshStatusBtn")
+    assert H.status() == "No run in progress."
+    press(H, "AnalyseBtn")
+    assert H.command_count() == launches + 1
+
+
 def test_a_run_from_an_earlier_panel_that_reports_again_marks_no_clip(lua, direct):
     """Nothing says which clip it was, so the clip under the playhead is left alone."""
     import time

@@ -1245,7 +1245,6 @@ local RUNNING = false
 -- Python, a second or two later, writes its own.
 local LAUNCHED_AT = nil
 local IMPORTED = false
-local ANALYSING = false
 -- "analysis" or "render", for the run this panel started. nil for one it
 -- picked up from an earlier panel, since nothing says which that is.
 local RUN_KIND = nil
@@ -2026,16 +2025,14 @@ local function apply_status(st, quiet)
             set_progress(0, nil)
             local why = st.message ~= "" and st.message
                 or "Failed. See the console for details."
-            if ANALYSING then items.AnalysisLabel.Text = why end
-            ANALYSING = false
+            if RUN_KIND == "analysis" then items.AnalysisLabel.Text = why end
             -- A Stop is what the editor asked for, with nothing to look into.
             offer_log(st.message ~= "Stopped.")
             set_status(why)
             return true
         end
         set_progress(1.0, "Finished")
-        if ANALYSING then
-            ANALYSING = false
+        if RUN_KIND == "analysis" then
             local placed, shared = 0, 0
             if ANALYSED_ITEM then placed, shared = mark_drawings(ANALYSED_ITEM, st.marks) end
             local report = st.message
@@ -2125,7 +2122,6 @@ local function follow_again(st, said)
     view.recover = nil
     -- Its heartbeat counts until it writes again, or before its first, its start.
     LAUNCHED_AT = (st and st.updated) or LAUNCHED_AT or started_at()
-    ANALYSING = RUN_KIND == "analysis"
     set_busy(true)
     if st then set_progress(st.fraction, st.stage) end
     set_status(said or "The run is reporting again. Its progress shows here.")
@@ -2174,8 +2170,7 @@ local function poll()
     print("[Upflow2x] Full log: " .. LOG_PATH)
     local msg = "Stopped without finishing: " .. why
         .. (SHOW_LOG and " Open Log shows the rest." or "")
-    if ANALYSING then items.AnalysisLabel.Text = msg end
-    ANALYSING = false
+    if RUN_KIND == "analysis" then items.AnalysisLabel.Text = msg end
     set_status(msg)
     return true
 end
@@ -2288,7 +2283,7 @@ local PENDING = "A finished render has not been added yet. "
 -- lands makes no sound, as apply_status says.
 -- False when there is nothing worth keeping, such as an old failure.
 local function settle(st, quiet)
-    if RUNNING then return apply_status(st, quiet) end
+    if RUNNING or RUN_KIND == "analysis" then return apply_status(st, quiet) end
     if st.ok and st.import_path ~= "" then
         view.recover = "pending"
         set_status(PENDING)
@@ -2498,7 +2493,6 @@ function win.On.AnalyseBtn.Clicked(ev)
         return
     end
     offer_log(false)
-    ANALYSING = true
     RUN_KIND = "analysis"
     ANALYSED_ITEM = SOURCE_ITEM
     IMPORTED = false
@@ -2537,7 +2531,6 @@ function win.On.SmoothBtn.Clicked(ev)
     end
     offer_log(false)
     IMPORTED = false
-    ANALYSING = false
     STAGE.name = nil
     RUN_PLACE = SOURCE_PLACE
     RUN_KIND = "render"
@@ -2675,7 +2668,6 @@ function win.On.CancelBtn.Clicked(ev)
     -- Gone with no exit code, the run may only have gone quiet, and may
     -- still finish after a new run has taken its place.
     local giving_up = state == "gone" and not exited and (st ~= nil or RUNNING)
-        and RUN_KIND ~= "analysis"
     if state == "gone" then st = claim_status() end
     -- Found finished by a press of Stop or Reset: it lands with no sound.
     if st and st.done and settle(st, true) then return end
@@ -2688,11 +2680,10 @@ function win.On.CancelBtn.Clicked(ev)
     if exited then os.remove(STOP_PATH) end
     -- A run given up on can still finish, so Refresh Progress stays to look.
     view.recover = giving_up and "gave_up" or nil
-    ANALYSING = false
     IMPORTED = false
     set_busy(false)
     set_progress(0, nil)
-    set_status(giving_up and "Ready. If the run you reset finishes after all, "
+    set_status(giving_up and RUN_KIND ~= "analysis" and "Ready. If the run you reset finishes after all, "
         .. "its render is in the Save to folder." or "Ready.")
 end
 
