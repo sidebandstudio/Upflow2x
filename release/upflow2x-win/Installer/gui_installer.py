@@ -11,11 +11,13 @@ That works on both Windows (official embeddable package) and macOS
 from __future__ import annotations
 
 import collections
+import contextlib
 import io
 import locale
 import os
 import platform
 import re
+import select
 import shutil
 import signal
 import ssl
@@ -148,7 +150,11 @@ def _start(args: list[str], **kwargs) -> tuple[subprocess.Popen, int | None]:
     it and, on Windows, its job object. Where Windows refuses the job, the
     child is ended before it has run, and _Uncontained says so."""
     if os.name != "nt":
-        return subprocess.Popen(args, start_new_session=True, **kwargs, **_NO_WINDOW), None
+        child = subprocess.Popen(args, start_new_session=True, **kwargs, **_NO_WINDOW)
+        # Watched from the start, so its exit is seen with its status.
+        child._exit_watch = _watch_exit(child.pid) if sys.platform == "darwin" else None
+        child._exit_code = None
+        return child, None
     child = subprocess.Popen(args, **kwargs,
                              creationflags=_NO_WINDOW["creationflags"] | _CREATE_SUSPENDED)
     job = _kernel32.CreateJobObjectW(None, None)
@@ -173,13 +179,72 @@ def _end(child: subprocess.Popen, job: int | None) -> None:
     elsewhere. Their copies of its output pipe close with them."""
     if job:
         _kernel32.TerminateJobObject(job, 1)
-    else:
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except OSError:
-            # Its session has ended already, or can't be signalled. End the
-            # child itself, as before.
-            child.kill()
+        return
+    # The group is named by child's ID, which can pass to another process
+    # once Popen has reaped child. Popen reaps only while holding
+    # _waitpid_lock, so with that held and no exit code yet, the ID is still
+    # child's, and so is the group.
+    with child._waitpid_lock:
+        if child.returncode is None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                # The group can't be signalled, so end the child itself.
+                child.kill()
+
+
+# From macOS's <sys/event.h>, which Python's select doesn't name. With it a
+# kqueue reports a child's exit status along with its exit.
+_NOTE_EXITSTATUS = 0x04000000
+
+
+def _watch_exit(pid: int):
+    """On macOS, a kqueue that reports when pid exits, and with what status,
+    without reaping it. None if pid had already begun to exit, which the
+    kernel refuses to watch, or no kqueue could be had. Then only reaping
+    pid tells its status."""
+    try:
+        watch = select.kqueue()
+    except OSError:
+        return None
+    try:
+        watch.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD,
+                                     select.KQ_NOTE_EXIT | _NOTE_EXITSTATUS)], 0, 0)
+    except OSError:
+        watch.close()
+        return None
+    return watch
+
+
+def _exit_status(child: subprocess.Popen) -> int | None:
+    """child's exit code once it has exited, else None. On macOS and Linux it
+    is read without reaping child, so until setup reaps it its ID still names
+    its process group, and setup can tell success from failure first."""
+    if os.name == "nt" or child.returncode is not None:
+        return child.poll()
+    if sys.platform != "darwin":
+        result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if result is None:
+            return None
+        return result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
+    if child._exit_watch is None:
+        # It couldn't be watched, so only reaping it tells its status.
+        return child.poll()
+    if child._exit_code is None:
+        events = child._exit_watch.control(None, 1, 0)
+        if not events:
+            return None
+        child._exit_code = os.waitstatus_to_exitcode(events[0].data)
+    return child._exit_code
+
+
+def _let_go(child: subprocess.Popen) -> None:
+    """Once nothing will signal child's group by its ID, reap child if it has
+    ended, so the ID can pass on, and stop watching it."""
+    child.poll()
+    watch = getattr(child, "_exit_watch", None)
+    if watch is not None:
+        watch.close()
 
 
 def _close_job(job: int | None) -> None:
@@ -672,6 +737,7 @@ class InstallerApp:
         if quit_meanwhile:
             _end(child, job)
             _close_job(job)
+            _let_go(child)
             raise _Quit()
         return child
 
@@ -684,8 +750,11 @@ class InstallerApp:
     def _release(self, child: subprocess.Popen):
         with self._child_lock:
             if self._child is child:
-                # On Windows, closing the job ends anything the child left running.
-                _close_job(self._job)
+                if self._job:
+                    # Closing the job ends anything the child left running.
+                    _close_job(self._job)
+                else:
+                    _let_go(child)
                 self._child = self._job = None
 
     def _run_child(self, args: list[str], timeout: float = 10,
@@ -697,9 +766,10 @@ class InstallerApp:
             stdout, stderr = child.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             self._stop(child)
-            # The child only. What it started outside its process group can
-            # keep its output open for good.
-            child.wait()
+            # The child only, and not for long. What it started outside its
+            # process group can keep its output open for good.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                child.wait(OUTPUT_GRACE)
             raise
         finally:
             self._release(child)
@@ -899,32 +969,41 @@ class InstallerApp:
                     if len(partial) > LINE_LIMIT:
                         received.append(partial)
                         partial = b""
+                step = None
                 for raw in received:
                     line = raw[:LINE_LIMIT].decode(encoding, "replace").rstrip()
                     if line:
                         tail.append(line)
-                        step = _pip_step(line)
-                        if step:
-                            self.root.after(0, self._pulse, step)
+                        step = _pip_step(line) or step
                 if not chunk:
                     time.sleep(0.1)
-                if proc.poll() is None:
-                    # Only a pip still running at the deadline has timed out.
-                    if not timed_out and time.monotonic() > deadline:
-                        timed_out = True
-                        self._stop(proc)
+                status = _exit_status(proc)
+                running = status is None
+                # Only a pip still running at the deadline has timed out. That
+                # is settled before the label changes, which is a call into the
+                # window, so however much pip prints at once, the deadline holds.
+                if running and not timed_out and time.monotonic() > deadline:
+                    timed_out = True
+                    self._stop(proc)
+                # The label shows the last step read.
+                if step:
+                    self.root.after(0, self._pulse, step)
+                if running:
+                    # A pip that won't end isn't waited on for good.
+                    if timed_out and time.monotonic() > deadline + OUTPUT_GRACE:
+                        break
                     continue
-                if drained:
-                    break
                 if ended is None:
                     ended = time.monotonic()
-                    # pip failed, and something still holds its output. What
-                    # is left in pip's own group or job is setup's to end, now,
-                    # or on macOS and Linux it would run on after setup lets
-                    # go, through Try Again. A timeout or Quit has ended it.
-                    if proc.returncode != 0 and not (timed_out or self._quit.is_set()):
+                    # pip failed. What is left in its own group or job is
+                    # setup's to end, now, before pip is reaped and its ID can
+                    # pass on. What a pip that succeeded started is left be. A
+                    # timeout or Quit has ended it already.
+                    if status != 0 and not (timed_out or self._quit.is_set()):
                         self._stop(proc)
-                if time.monotonic() - ended > OUTPUT_GRACE:
+                # By now pip's own output has all been read. After a success
+                # nothing more is waited for; after a failure, a little.
+                elif drained or time.monotonic() - ended > (OUTPUT_GRACE if status else 0):
                     break
         finally:
             proc.stdout.close()
