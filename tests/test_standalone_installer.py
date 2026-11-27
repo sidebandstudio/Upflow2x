@@ -617,13 +617,20 @@ import time
 from pathlib import Path
 
 role, folder, lifetime = sys.argv[1], Path(sys.argv[2]), float(sys.argv[3])
+flags = sys.argv[4:]
 if role == "pip":
     # The build writes to pip's output, as a compiler run from a build
     # backend can, so the pipe setup reads stays open while it runs.
-    subprocess.Popen([sys.executable, __file__, "build", str(folder), str(lifetime), *sys.argv[4:]],
+    subprocess.Popen([sys.executable, __file__, "build", str(folder), str(lifetime), *flags],
                      stdout=sys.stdout, creationflags=0x08000000 if sys.platform == "win32" else 0)
     print("Collecting numpy", flush=True)
-elif sys.argv[4:] == ["apart"]:
+    if "fail" in flags:
+        # pip fails once its build is running, and leaves it running.
+        end = time.monotonic() + 10
+        while not (folder / "build").exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        sys.exit(1)
+elif "apart" in flags:
     # A process group of its own, which ending pip's group does not reach.
     os.setpgid(0, 0)
 count, end = 0, time.monotonic() + lifetime
@@ -664,11 +671,12 @@ def children(tmp_path, monkeypatch):
     its own, started with the options setup gave it: a pip for a pip install,
     and a quick check for anything else. The nth runs for lifetimes[n]
     seconds where that is set, or else for lifetime. With apart, pip's build
-    leaves pip's process group."""
+    leaves pip's process group, and with fail, pip exits 1 once its build is
+    running."""
     script = tmp_path / "tree.py"
     script.write_text(TREE, encoding="utf-8")
     real_popen = subprocess.Popen
-    started = SimpleNamespace(folders=[], lifetime=20.0, lifetimes=[], apart=False)
+    started = SimpleNamespace(folders=[], lifetime=20.0, lifetimes=[], apart=False, fail=False)
 
     def stand_in(args, **kwargs):
         folder = Path(tempfile.mkdtemp(dir=tmp_path))
@@ -676,8 +684,8 @@ def children(tmp_path, monkeypatch):
         started.folders.append(folder)
         role = "pip" if "install" in args else "probe"
         lifetime = started.lifetimes[n] if n < len(started.lifetimes) else started.lifetime
-        apart = ["apart"] if started.apart else []
-        return real_popen([sys.executable, str(script), role, str(folder), str(lifetime), *apart],
+        flags = [flag for flag in ("apart", "fail") if getattr(started, flag)]
+        return real_popen([sys.executable, str(script), role, str(folder), str(lifetime), *flags],
                           **kwargs)
 
     def wait_for(n, role="build", within=10):
@@ -1060,3 +1068,119 @@ def test_where_windows_refuses_a_job_nothing_runs(children, monkeypatch):
     assert not count(children.folders[0] / "pip"), "pip ran outside a job"
     errors = [msg for msg, tag in app.logged if tag == "err"]
     assert len(errors) == 1 and errors[0].startswith("  Could not run pip: Windows")
+
+
+# --------------------------------------------------------------------------
+# a check that cannot run, and a pip that failed
+# --------------------------------------------------------------------------
+
+REFUSED = "Windows would not let setup keep track of the processes it starts (error 5)."
+
+
+def test_a_python_setup_cannot_check_is_left_alone_but_a_broken_one_is_replaced(tmp_path):
+    """A refused job said nothing about the Python, but the check read it as
+    broken, and a frozen setup then replaced it. Only a Python whose check
+    ran and failed counts as broken."""
+    exe = gui._embedded_python_exe(tmp_path)
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"healthy runtime")
+
+    def refused(args):
+        raise gui._Uncontained(REFUSED)
+
+    with pytest.raises(gui._Uncontained):
+        gui._find_embedded_python(tmp_path, refused)
+    with pytest.raises(gui._Uncontained):
+        gui._python_version_str(str(exe), refused)
+
+    def broken(args):
+        raise OSError(193, "not a valid Win32 application")
+
+    assert gui._find_embedded_python(tmp_path, broken) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="job objects are Windows only")
+def test_a_refused_check_leaves_the_installed_python_and_settings_alone(setup, children,
+                                                                        monkeypatch):
+    """On a reinstall, Windows refused the check's job. Setup took the
+    healthy private Python for broken and deleted it with its packages, then
+    failed to set up a new one for the same reason."""
+    import ctypes
+    app, scripts = setup
+    exe = gui._embedded_python_exe(app.repo_root)
+    package = exe.parent / "Lib" / "site-packages" / "numpy" / "__init__.py"
+    package.parent.mkdir(parents=True)
+    exe.write_bytes(b"healthy runtime")
+    package.write_text("installed numpy", encoding="utf-8")
+    scripts.mkdir(parents=True)
+    (scripts / "Eternal2x.conf").write_text("threshold=8\n", encoding="utf-8")
+    (scripts / "Upflow2x.lua").write_text("previous launcher", encoding="utf-8")
+    monkeypatch.setattr(gui, "_find_embedded_python", REAL_FIND_EMBEDDED_PYTHON)
+    del app._setup_embedded_python
+    downloads = []
+    monkeypatch.setattr(gui, "_download_with_progress",
+                        lambda url, callback=None: downloads.append(url) or b"")
+
+    def refuse(job, process):
+        ctypes.set_last_error(5)  # ERROR_ACCESS_DENIED
+        return 0
+
+    monkeypatch.setattr(gui, "_kernel32",
+                        Kernel32(gui._kernel32, AssignProcessToJobObject=refuse))
+    logged = []
+    app._log = lambda msg, tag=None: logged.append((msg, tag))
+    app._on_finish = mock.Mock()
+    app._run_install()
+    assert not downloads, "setup went on to replace the Python it could not check"
+    assert exe.read_bytes() == b"healthy runtime"
+    assert package.read_text(encoding="utf-8") == "installed numpy"
+    assert (scripts / "Eternal2x.conf").read_text(encoding="utf-8") == "threshold=8\n"
+    assert (scripts / "Upflow2x.lua").read_text(encoding="utf-8") == "previous launcher"
+    assert not app.install_done
+    assert any(REFUSED in msg and tag == "err" for msg, tag in logged), logged
+    app._on_finish.assert_called_once()
+
+
+@pytest.mark.parametrize("code", [1, 0])
+def test_a_pip_that_ended_with_its_output_held_is_ended_with_its_group_only_if_it_failed(
+        monkeypatch, code):
+    """On macOS and Linux setup let go of a failed pip's process group with
+    something in it still holding pip's output, which Try Again could not
+    stop. A pip that exits 0 is left to finish as before."""
+    held = threading.Event()
+    pip = FakePip(["Collecting numpy"], code=code, held=held)
+    monkeypatch.setattr(gui.subprocess, "Popen", pip)
+    monkeypatch.setattr(gui, "OUTPUT_GRACE", 0.3)
+    app = window()
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, "python")
+    try:
+        worker.join(5)
+        assert not worker.is_alive()
+    finally:
+        held.set()
+    assert outcome == [code == 0]
+    assert pip.killed.is_set() is (code != 0)
+    assert app._child is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX, Windows uses job objects")
+@pytest.mark.parametrize("group", ["pip's group", "a group of its own"])
+def test_a_failed_pip_leaves_no_build_running_in_its_group(children, monkeypatch, group):
+    """pip failed before its deadline with its build still running and
+    holding pip's output. Setup let go of pip's process group with the build
+    in it, which went on changing packages through Try Again. A build that
+    left the group is not setup's to end, and is not waited on."""
+    monkeypatch.setattr(gui, "OUTPUT_GRACE", 1)
+    children.fail = True
+    children.apart = group == "a group of its own"
+    app = window()
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, sys.executable)
+    pip = children.wait_for(0)
+    worker.join(8)
+    assert not worker.is_alive() and outcome == [False]
+    if group == "pip's group":
+        assert stopped(pip / "build"), "the build in pip's group went on running"
+    else:
+        assert beating(pip / "build"), "setup ended a build outside pip's group"

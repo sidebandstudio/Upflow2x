@@ -138,10 +138,15 @@ if os.name == "nt":
     _CREATE_SUSPENDED = 0x4
 
 
+class _Uncontained(OSError):
+    """Windows refused the job object a child would run in, so it was ended
+    before it ran. It says nothing about the program the child was."""
+
+
 def _start(args: list[str], **kwargs) -> tuple[subprocess.Popen, int | None]:
     """Start a child that _end can stop with every process it starts. Returns
     it and, on Windows, its job object. Where Windows refuses the job, the
-    child is ended before it has run, and OSError says so."""
+    child is ended before it has run, and _Uncontained says so."""
     if os.name != "nt":
         return subprocess.Popen(args, start_new_session=True, **kwargs, **_NO_WINDOW), None
     child = subprocess.Popen(args, **kwargs,
@@ -159,8 +164,8 @@ def _start(args: list[str], **kwargs) -> tuple[subprocess.Popen, int | None]:
     child.kill()
     child.wait()
     _close_job(job)
-    raise OSError("Windows would not let setup keep track of the processes it starts "
-                  f"(error {error}).")
+    raise _Uncontained("Windows would not let setup keep track of the processes it starts "
+                       f"(error {error}).")
 
 
 def _end(child: subprocess.Popen, job: int | None) -> None:
@@ -230,13 +235,17 @@ def _read_version(repo_root: Path) -> str:
 
 # The checks below run Python through `run`, which setup gives them: like
 # subprocess.run with the output captured, but in a child Quit can end, and
-# none starts after Quit.
+# none starts after Quit. A check Windows would not run says nothing of the
+# Python, so _Uncontained goes on up rather than mark a working Python broken,
+# which would have setup replace it.
 
 def _check_python(path: str, run) -> bool:
     try:
         result = run(
             [path, "-c", "import sys; sys.exit(not ((3, 10) <= sys.version_info[:2] < (3, 15)))"])
         return result.returncode == 0
+    except _Uncontained:
+        raise
     except Exception:
         return False
 
@@ -301,6 +310,8 @@ def _python_version_str(python_path: str, run) -> str:
     try:
         r = run([python_path, "--version"])
         return (r.stdout + r.stderr).strip()
+    except _Uncontained:
+        raise
     except Exception:
         return python_path
 
@@ -907,6 +918,12 @@ class InstallerApp:
                     break
                 if ended is None:
                     ended = time.monotonic()
+                    # pip failed, and something still holds its output. What
+                    # is left in pip's own group or job is setup's to end, now,
+                    # or on macOS and Linux it would run on after setup lets
+                    # go, through Try Again. A timeout or Quit has ended it.
+                    if proc.returncode != 0 and not (timed_out or self._quit.is_set()):
+                        self._stop(proc)
                 if time.monotonic() - ended > OUTPUT_GRACE:
                     break
         finally:
