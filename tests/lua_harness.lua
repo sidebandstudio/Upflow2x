@@ -485,7 +485,11 @@ function H.load(script_path, clip_file_path)
         table.insert(H.prints, table.concat(parts, "\t"))
     end
 
+    -- H.after_status_read and H.after_claim run as the panel opens, as they
+    -- do during a click.
+    local restore = H.interleave()
     local ok, err = pcall(dofile, script_path)
+    restore()
 
     os.execute = real_execute
     print = real_print
@@ -520,9 +524,10 @@ function H.fire(id, event)
 end
 
 -- H.after_status_read, when set, runs once during the next click, right after
--- the panel first reads its status file, or finds none: the run writing its
--- status or exit code between the panel's reads. The panel still gets what
--- it read, as a read that came first would.
+-- the panel first reads its status file as a status, or finds none: the run
+-- writing its status or exit code between the panel's reads. The panel still
+-- gets what it read, as a read that came first would. A check that the file
+-- is there, which opens it as bytes, does not count as that read.
 -- H.after_claim runs once during the next click, right after the panel first
 -- tries to move its status file aside, whether or not there was one to move.
 -- Each is cleared once it has run, so a test can tell that it did.
@@ -552,8 +557,7 @@ local function interleave()
     if not hook then return function() os.rename = real_rename end end
     local real_open = io.open
     io.open = function(path, mode)
-        if not (hook and is_status_file(path)
-                and (mode or "r"):sub(1, 1) == "r") then
+        if not (hook and is_status_file(path) and (mode or "r") == "r") then
             return real_open(path, mode)
         end
         local f = real_open(path, mode)
@@ -579,6 +583,8 @@ local function interleave()
         os.rename = real_rename
     end
 end
+-- H.load, above, runs them as the panel opens, too.
+H.interleave = interleave
 
 function H.click(id)
     local handler = on(id).Clicked

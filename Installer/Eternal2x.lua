@@ -756,10 +756,9 @@ local function start_script(script, fallback)
     return (ok == true or ok == 0)
 end
 
--- True once the run is on its way. Python reports from then on.
-local function run_background(module_name, args)
-    local cmd = build_command(module_name, args, true)
-    if not cmd then return false end
+-- Starts `cmd`, a background command build_command made, which writes what
+-- it needs first. True once the run is on its way. Python reports from then on.
+local function run_background(cmd)
     print("[Upflow2x] " .. cmd)
     if is_windows() then return start_script(RUN_SCRIPT, cmd) end
     local ok = execute(cmd)
@@ -2183,6 +2182,11 @@ end
 -- or no run at all. The status and exit code read come back with it.
 local function look()
     local exited = read_exit_code()
+    -- Whether there is a status at all, looked at before it is read. A first
+    -- heartbeat written between the two then reads as a heartbeat. The other
+    -- way round, it read as neither a heartbeat nor no status, and a run just
+    -- reporting for the first time was taken for gone.
+    local present = exists(STATUS_PATH)
     local st = read_status()
     if st and st.done then return "finished", st, exited end
     if exited then return "gone", st, exited end
@@ -2193,7 +2197,7 @@ local function look()
     -- another over it. Only while it has written no status: an empty one is a
     -- run whose end a panel showed.
     local last = (st and st.updated) or (RUNNING and LAUNCHED_AT)
-        or (not st and not exists(STATUS_PATH) and started_at())
+        or (not st and not present and started_at())
     -- Either way of the clock: a heartbeat from before the clock was moved
     -- back is in the future, and is no more alive than an old one.
     if last and math.abs(os.time() - last) < STALLED_AFTER then return "live", st, exited end
@@ -2367,16 +2371,33 @@ local function commit_pointer(new)
     return moved == true
 end
 
+-- Puts the pointer naming `last` back in place from `back`, the copy of it a
+-- launch wrote before the new run took the pointer, with moves alone, so a
+-- full disk cannot stop it. Before 0.5.2's first run there was no pointer, so
+-- there is none again. True when done, and the copy is gone with it.
+local function put_back(back, last)
+    if last ~= "" then return commit_pointer(back) end
+    if os.remove(RUN_POINTER) or not exists(RUN_POINTER) then
+        os.remove(back)
+        return true
+    end
+    return false
+end
+
 -- Starts a run with files of its own, `marks` among them, and makes it the
--- run the panel owns, the one the pointer names. The pointer goes in before
--- the run starts, so a run that starts is always one a panel opened later can
--- find: if it cannot go in, nothing starts. If the run then cannot start, the
--- last run's pointer goes back, so a run Reset gave up on that finishes after
--- all is still found. Nothing else of the last run changes until the new one
--- is on its way. Then the last run's files go when `ended`, the look before
--- it, showed that run had ended. One that may still be going keeps them, and
--- they are the only files it can write to. Returns whether the run started,
--- and if not, why.
+-- run the panel owns, the one the pointer names. Everything it needs written
+-- is written first, while the last run still owns everything, so a write that
+-- fails, as on a full disk, stops it there: its pointer, its marked frames,
+-- its command, and a copy of the pointer in place. Then its pointer goes in,
+-- before it starts, so a run that starts is always one a panel opened later
+-- can find: if it cannot go in, nothing starts. If the run then cannot start,
+-- the copy goes back in place, so a run Reset gave up on that finishes after
+-- all is still found. If even that fails, the copy stays, and the next panel
+-- to open puts it back. Nothing else of the last run changes until the new
+-- one is on its way. Then the last run's files go when `ended`, the look
+-- before it, showed that run had ended. One that may still be going keeps
+-- them, and they are the only files it can write to. Returns whether the run
+-- started, and if not, why.
 local function launch(ended, extra, marks)
     local last = RUN_TAG
     local tag
@@ -2407,25 +2428,25 @@ local function launch(ended, extra, marks)
         end
         extra = extra .. " --marks-file " .. shell_quote(files.marks)
     end
-    if not commit_pointer(new) then
-        os.remove(new)
-        os.remove(files.marks)
-        return false, CANNOT_START
-    end
+    local back = written(RUN_POINTER .. ".back-" .. tag, last)
     use_run(tag)
-    if not run_background("Stages.resolve_smooth", current_args(extra)) then
-        -- It never started, so the last run is the one the panel owns again,
-        -- here and in the pointer. Before 0.5.2's first run there was none.
+    local cmd = back and build_command("Stages.resolve_smooth", current_args(extra), true)
+    if not (cmd and commit_pointer(new)) then
         use_run(last)
-        if last == "" then
-            os.remove(RUN_POINTER)
-        else
-            local back = written(RUN_POINTER .. ".back-" .. tag, last)
-            if back and not commit_pointer(back) then os.remove(back) end
-        end
+        os.remove(new)
+        if back then os.remove(back) end
         for _, path in pairs(files) do os.remove(path) end
         return false, CANNOT_START
     end
+    if not run_background(cmd) then
+        -- It never started, so the last run is the one the panel owns again,
+        -- here and, by moves alone, in the pointer.
+        use_run(last)
+        put_back(back, last)
+        for _, path in pairs(files) do os.remove(path) end
+        return false, CANNOT_START
+    end
+    os.remove(back)
     if ended then
         for _, path in pairs(run_files(last)) do os.remove(path) end
     end
@@ -2808,6 +2829,23 @@ else
     refresh_source()
     start_polling()
     set_status(SOURCE_PATH and "Ready." or items.SourceLabel.Text)
+    -- A launch whose run could not start, and whose pointer could not go back,
+    -- left the copy of the last run's pointer beside it. A run that started
+    -- has a log by now, made as its shell began, or a status or exit code.
+    -- With none, the last run is the one the panel owns, and goes back in
+    -- place. With one, the copy is only left over.
+    if RUN_TAG ~= "" then
+        local back = RUN_POINTER .. ".back-" .. RUN_TAG
+        local before = read_file(back)
+        local files = run_files(RUN_TAG)
+        if before and not (exists(files.log) or exists(files.status) or exists(files.exit)) then
+            before = before:match("^%s*([%w%-]*)")
+            put_back(back, before)
+            use_run(before)
+        elseif before then
+            os.remove(back)
+        end
+    end
     -- One look at the run the panel owns, as an earlier panel left it.
     local state, waiting, exited = look()
     local failed = exited ~= nil and exited ~= "0"

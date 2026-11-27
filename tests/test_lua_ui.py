@@ -4977,3 +4977,124 @@ def test_a_run_reset_after_it_ended_is_not_reported_again_when_reopened(lua, dir
     refresh_in_settings(H)
     assert H.status() == "No run in progress." and "FolderBtn" not in shown(H)
     assert run_file(direct, "exit").exists(), "the proof the run ended went"
+
+
+# --------------------------------------------------------------------------
+# PR 30 review, round 2: a launch that fails must not hide the run before
+# --------------------------------------------------------------------------
+
+def break_writes_of(lua, *patterns):
+    """Files whose path matches one of the Lua `patterns` open to write, then
+    fail as they close, as on a full disk. Until mend_writes."""
+    listed = ", ".join(f'"{p}"' for p in patterns)
+    lua.execute(f"""
+        REAL_OPEN = REAL_OPEN or io.open
+        local real_open = REAL_OPEN
+        io.open = function(path, mode)
+            local f = real_open(path, mode)
+            if not (f and (mode or "r"):find("w")) then return f end
+            for _, pattern in ipairs({{ {listed} }}) do
+                if tostring(path):find(pattern) then
+                    return {{ write = function(self) return self end,
+                             close = function() f:close() return nil, "No space left on device" end }}
+                end
+            end
+            return f
+        end
+    """)
+
+
+def only_the_run_before_left(root, a):
+    """No file of the run that never started, and no pointer of its launch."""
+    assert all(p.name.startswith(f".upflow2x_run-{a}.")
+               for p in root.glob(".upflow2x_run-*")), "B left files behind"
+    assert not list(root.glob(".upflow2x_run.*")), "a launch left a pointer behind"
+
+
+@pytest.mark.parametrize("then", ["refresh", "reopen"])
+def test_writes_that_fail_as_b_starts_never_hide_the_run_before(lua, direct, then):
+    """B's pointer went in before its run script was written. With the script
+    and the copy of A's pointer to put back both failing to write, B never
+    started, but the pointer still named it, and A, finishing after all, was
+    lost to a panel opened again."""
+    lua.execute('package.config = "\\\\" .. package.config:sub(2)')
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    first = H.src_span
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    break_writes_of(lua, "%.cmd$", "%.upflow2x_run%.back%-")
+    launches = H.command_count()
+    press(H, "SmoothBtn")
+    mend_writes(lua)
+    assert "Could not start the run" in H.status()
+    assert H.command_count() == launches, "B launched"
+    assert run_tag(direct) == a, "the pointer names a run that never started"
+    only_the_run_before_left(direct, a)
+    ends(direct, a, "shot")
+    if then == "reopen":
+        H = load(lua, ui_script(direct))
+        assert "finished while the panel was closed" in H.status()
+    else:
+        back_to_the_first_clip(lua, H, first)
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1 and H.imported_at(1) == "/renders/shot_smooth.mp4"
+
+
+def test_a_pointer_that_cannot_go_back_after_a_failed_start_still_leaves_the_run_before(
+        lua, direct):
+    """B could not start, and moving A's pointer back failed too. The copy of
+    A's pointer was then deleted, and the next panel followed B, which had
+    never started, while A's result was lost."""
+    H = load(lua, ui_script(direct))
+    a = give_up_on_a_quiet_render(H, direct)
+    H.next_clip("/media/shot_b.mov", "clip-b", 90000, 24)
+    H.exit_code = 1
+    break_renames(lua, "%.upflow2x_run%.back%-")
+    launches = H.command_count()
+    press(H, "SmoothBtn")
+    mend_renames(lua)
+    H.exit_code = 0
+    assert H.command_count() == launches + 1, "B was not tried"
+    assert "Could not start the run" in H.status()
+    assert run_tag(direct) not in ("", a), "the pointer went back after all"
+    ends(direct, a, "shot")
+    H = load(lua, ui_script(direct))
+    assert run_tag(direct) == a, "the pointer was not put back as the panel opened"
+    only_the_run_before_left(direct, a)
+    assert "finished while the panel was closed" in H.status()
+    press(H, "RefreshStatusBtn")
+    assert H.imported_count() == 1 and H.imported_at(1) == "/renders/shot_smooth.mp4"
+
+
+def test_a_launch_leaves_no_copy_of_the_pointer_before_it(lua, direct):
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    first = run_tag(direct)
+    run_file(direct, "exit").write_text("0\n")
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    assert run_tag(direct) not in ("", first)
+    assert not list(direct.glob(".upflow2x_run.*"))
+
+
+@pytest.mark.parametrize("separator", ["\\\\", "/"])
+def test_a_first_heartbeat_published_as_the_panel_opens_is_followed(lua, direct, separator):
+    """The panel read no status, then found one there, so the run counted from
+    neither its heartbeat nor its start, and the panel stopped following it."""
+    import time
+    lua.execute(f'package.config = "{separator}" .. package.config:sub(2)')
+    conf = direct / "Installer" / "Eternal2x.conf"
+    conf.write_text(conf.read_text().replace("auto_update=false", "auto_update=true"))
+    H = load(lua, ui_script(direct))
+    press(H, "SmoothBtn")
+    assert not run_file(direct, "status").exists()
+    H = lua.eval(f'dofile("{HARNESS.as_posix()}")')
+    H.after_status_read = lambda: write_status(direct, fraction=0.01, updated=time.time())
+    H.load(str(ui_script(direct)), "/media/shot.mov")
+    assert H.after_status_read is None, "the heartbeat did not come as the panel looked"
+    assert H.status() == STILL_GOING and not H.enabled("SmoothBtn")
+    assert not any("resolve_update" in c for c in H.commands.values()), "it updated over the run"
+    write_status(direct, fraction=1.0, done=True, ok=True, message="Rendered.",
+                 import_path="/tmp/a.mp4", updated=time.time())
+    H.fire("PollTimer", "Timeout")
+    assert H.imported_count() == 1
