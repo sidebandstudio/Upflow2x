@@ -2685,7 +2685,7 @@ function win.On.CancelBtn.Clicked(ev)
     -- with, so a panel opened later does not report it again. One that only
     -- went quiet is not, as it may still finish, or fail and say why.
     if exited or (st and st.done) then mark_seen() end
-    os.remove(STOP_PATH)
+    if exited then os.remove(STOP_PATH) end
     -- A run given up on can still finish, so Refresh Progress stays to look.
     view.recover = giving_up and "gave_up" or nil
     ANALYSING = false

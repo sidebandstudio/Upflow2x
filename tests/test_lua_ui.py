@@ -4847,6 +4847,30 @@ def test_a_stop_sent_before_closing_keeps_its_render_silent_when_reopened(
     assert len(chimes(H)) == (0 if stopped else 1), "a render someone stopped rang"
 
 
+def test_reset_of_a_quiet_worker_keeps_its_confirmed_stop(lua, tmp_path, repo_root):
+    import time
+    from Stages.resolve_smooth import StatusFile, Stopped
+
+    root = chime_tree(tmp_path, repo_root, chime=True)
+    on_a_mac(lua)
+    H = load(lua, ui_script(root))
+    press(H, "SmoothBtn")
+    write_status(root, fraction=0.5, updated=time.time())
+    press(H, "CancelBtn")
+    press(H, "CancelBtn")
+    write_status(root, fraction=0.5, updated=time.time() - 600)
+    press(H, "RefreshStatusBtn")
+    assert H.text_of("CancelBtn") == "Reset"
+    press(H, "CancelBtn")
+    with pytest.raises(Stopped):
+        StatusFile(str(run_file(root, "status"))).check_stop()
+
+    write_status(root, done=True, ok=True, import_path="/tmp/finished.mp4")
+    reopened = load(lua, ui_script(root))
+    press(reopened, "RefreshStatusBtn")
+    assert reopened.imported_count() == 1 and not chimes(reopened)
+
+
 def test_a_0_5_1_runs_leftover_claim_is_never_read_as_its_result(lua, direct):
     """0.5.1 reuses its names and never clears that one, so a finished status
     left aside long ago could be another run's. A new 0.5.1 crash shows."""
