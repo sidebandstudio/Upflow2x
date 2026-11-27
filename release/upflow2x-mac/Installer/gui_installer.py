@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import collections
 import io
+import locale
 import os
 import platform
-import queue
 import re
 import shutil
 import signal
@@ -106,6 +106,7 @@ _NO_WINDOW = ({"creationflags": subprocess.CREATE_NO_WINDOW}
 # elsewhere, and is ended with everything it started.
 if os.name == "nt":
     import ctypes
+    import msvcrt
     from ctypes import wintypes
 
     class _JobLimits(ctypes.Structure):
@@ -125,6 +126,8 @@ if os.name == "nt":
     _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
     _kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _kernel32.PeekNamedPipe.argtypes = (wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                                        wintypes.LPVOID, wintypes.LPDWORD, wintypes.LPVOID)
     # A child starts suspended until it is in its job, so it can start
     # nothing outside it. NtResumeProcess resumes it whole. It is missing
     # from Windows' published API but has been in ntdll since XP, and psutil
@@ -177,6 +180,22 @@ def _end(child: subprocess.Popen, job: int | None) -> None:
 def _close_job(job: int | None) -> None:
     if job:
         _kernel32.CloseHandle(job)
+
+
+def _read_ready(fd: int) -> bytes | None:
+    """What the pipe at fd holds now, without waiting for more: b"" while it
+    holds nothing, None once every writer has closed it. On macOS and Linux fd
+    has to be non-blocking."""
+    if os.name == "nt":
+        ready = wintypes.DWORD()
+        if not _kernel32.PeekNamedPipe(msvcrt.get_osfhandle(fd), None, 0, None,
+                                       ctypes.byref(ready), None):
+            return None
+        return os.read(fd, min(ready.value, 65536)) if ready.value else b""
+    try:
+        return os.read(fd, 65536) or None
+    except BlockingIOError:
+        return b""
 
 
 def _find_repo_root() -> Path:
@@ -325,6 +344,10 @@ PIP_TIMEOUT = 600
 # How long setup goes on reading pip's output after pip has ended. Something
 # pip started outside its process group can keep the output open for good.
 OUTPUT_GRACE = 2
+
+# A line of pip's output longer than this is cut here, so output with no line
+# ends can't fill memory.
+LINE_LIMIT = 4096
 
 # How long setup waits, once its window has closed, for the install thread to
 # end a child process that was still starting when Quit was pressed.
@@ -836,40 +859,44 @@ class InstallerApp:
         try:
             # Unbuffered, or pip's lines would arrive in blocks.
             proc = self._launch(pip_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, errors="replace",
                                 env={**os.environ, "PYTHONUNBUFFERED": "1"})
         except OSError as exc:
             self.root.after(0, self._log, f"  Could not run pip: {exc}", "err")
             return False
 
-        # Read on a thread of its own, so setup can stop waiting on output
-        # something pip started keeps open. A daemon, so it never keeps setup
-        # running after its window closes.
-        output: queue.Queue = queue.Queue()
-
-        def read():
-            for line in proc.stdout:
-                output.put(line)
-            output.put(None)
-
-        threading.Thread(target=read, daemon=True).start()
+        # Only what has arrived is read, here, so setup never waits on output
+        # something pip started keeps open. Once it stops reading it closes
+        # its end, and whatever still writes to the pipe is refused.
         deadline = time.monotonic() + PIP_TIMEOUT
         tail = collections.deque(maxlen=50)
+        partial = b""
         timed_out = drained = False
         ended = None
         try:
+            fd = proc.stdout.fileno()
+            if os.name != "nt":
+                os.set_blocking(fd, False)
+            encoding = locale.getpreferredencoding(False)
             while True:
-                try:
-                    line = output.get(timeout=0.2)
-                except queue.Empty:
-                    line = ""
-                if line is None:
+                chunk = b"" if drained else _read_ready(fd)
+                if chunk is None:
                     drained = True
-                elif line:
-                    tail.append(line.rstrip())
-                    step = _pip_step(line)
-                    if step:
-                        self.root.after(0, self._pulse, step)
+                    received, partial = [partial], b""
+                else:
+                    received = (partial + chunk).split(b"\n")
+                    partial = received.pop()
+                    if len(partial) > LINE_LIMIT:
+                        received.append(partial)
+                        partial = b""
+                for raw in received:
+                    line = raw[:LINE_LIMIT].decode(encoding, "replace").rstrip()
+                    if line:
+                        tail.append(line)
+                        step = _pip_step(line)
+                        if step:
+                            self.root.after(0, self._pulse, step)
+                if not chunk:
+                    time.sleep(0.1)
                 if proc.poll() is None:
                     # Only a pip still running at the deadline has timed out.
                     if not timed_out and time.monotonic() > deadline:
@@ -883,6 +910,7 @@ class InstallerApp:
                 if time.monotonic() - ended > OUTPUT_GRACE:
                     break
         finally:
+            proc.stdout.close()
             self._release(proc)
         self._check_quit()
         # A pip that exited 0 as the deadline came has finished.

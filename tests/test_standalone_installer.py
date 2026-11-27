@@ -200,10 +200,11 @@ def test_the_label_follows_pip_from_package_to_package(line, step):
 
 
 class FakePip:
-    """pip as Popen sees it: its lines, then its exit code. With hang it runs
-    until killed, with times_out a wait given a timeout runs out, with a gate
-    Popen does not return until the gate opens, and with held something pip
-    started keeps its output open, after pip has ended, until held is set."""
+    """pip as Popen sees it: its lines through a real OS pipe, then its exit
+    code. With hang it runs until killed, with times_out a wait given a
+    timeout runs out, with a gate Popen does not return until the gate opens,
+    and with held something pip started keeps the pipe's write end, writer,
+    open after pip has ended, until held is set."""
 
     def __init__(self, lines=(), code=0, hang=False, times_out=False, gate=None, held=None):
         self.lines, self.code, self.hang = lines, code, hang
@@ -213,6 +214,7 @@ class FakePip:
         self.starting = threading.Event()
         self.args = self.kwargs = None
         self.calls = 0
+        self.writer = self._stdout = None
 
     def __call__(self, args, **kwargs):
         self.calls += 1
@@ -220,16 +222,33 @@ class FakePip:
         self.starting.set()
         if self.gate is not None:
             assert self.gate.wait(5), "Popen was never let return"
-        self.stdout = self._read()
         return self
 
-    def _read(self):
-        yield from (line + "\n" for line in self.lines)
-        if self.hang:
-            assert self.killed.wait(5), "setup never gave up on pip"
-        self.returncode = self.code
-        if self.held is not None:
-            self.held.wait(10)
+    @property
+    def stdout(self):
+        """The pipe's read end, made when setup first reads it, in text mode
+        where setup asked Popen for text."""
+        if self._stdout is None:
+            read_end, self.writer = os.pipe()
+            self._stdout = (open(read_end, errors=self.kwargs.get("errors"))
+                            if self.kwargs.get("text") else open(read_end, "rb"))
+            threading.Thread(target=self._write, name="fake pip", daemon=True).start()
+        return self._stdout
+
+    def _write(self):
+        try:
+            try:
+                for line in self.lines:
+                    os.write(self.writer, (line + "\n").encode())
+            except OSError:
+                pass  # setup closed its end
+            if self.hang:
+                assert self.killed.wait(5), "setup never gave up on pip"
+            self.returncode = self.code
+            if self.held is not None:
+                self.held.wait(10)
+        finally:
+            os.close(self.writer)
 
     def communicate(self, timeout=None):
         if self.times_out and timeout is not None and not self.killed.is_set():
@@ -842,6 +861,76 @@ def test_output_held_open_past_the_deadline_cannot_hold_setup(monkeypatch):
     assert outcome == [False] and pip.killed.is_set()
     assert [msg for msg, tag in app.logged if tag == "err"] == [
         "  Timed out after 10 minutes.", "  Something pip started is still running."]
+
+
+def writing_is_refused(fd: int) -> bool:
+    """Whether writes to the pipe at fd fail, as they do once nothing has its
+    read end open. A reader that kept going would take them all, and one that
+    stopped while keeping its end open would leave the writer stuck."""
+    outcome = []
+
+    def write():
+        try:
+            for _ in range(64):
+                os.write(fd, b"x" * 4096)
+            outcome.append("written")
+        except OSError:
+            outcome.append("refused")
+
+    writer = threading.Thread(target=write, daemon=True)
+    writer.start()
+    writer.join(2)
+    return outcome == ["refused"]
+
+
+@pytest.mark.parametrize("ending", ["exit 0", "time out", "quit"])
+def test_output_left_open_is_let_go_once_setup_stops_reading(monkeypatch, ending):
+    """Setup stopped waiting on output something pip started kept open, but a
+    thread went on reading it, keeping all of it, for each attempt. Once setup
+    has returned, nothing of it reads the pipe or holds its end, so whatever
+    keeps writing to it is refused at once, attempt after attempt."""
+    monkeypatch.setattr(gui, "OUTPUT_GRACE", 0.3)
+    monkeypatch.setattr(gui, "PIP_TIMEOUT", 0.3 if ending == "time out" else 600)
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *args, **kwargs: True)
+    before = set(threading.enumerate())
+    pips = []
+    try:
+        for attempt in range(2):
+            pip = FakePip(["Collecting numpy"], hang=ending != "exit 0", held=threading.Event())
+            pips.append(pip)
+            monkeypatch.setattr(gui.subprocess, "Popen", pip)
+            app = window(installing=True)
+            app._pulse = lambda label: None
+            worker, outcome = in_thread(app._install_packages, "python")
+            if ending == "quit":
+                assert pip.starting.wait(5)
+                time.sleep(0.3)
+                app._close()
+            worker.join(5)
+            assert not worker.is_alive()
+            expected = {"exit 0": True, "time out": False}.get(ending)
+            assert outcome == [expected] if expected is not None else isinstance(outcome[0], gui._Quit)
+            assert pip.stdout.closed, "setup kept its end of the pipe open"
+            left = [thread for thread in set(threading.enumerate()) - before
+                    if thread.is_alive() and thread.name != "fake pip"]
+            assert not left, f"attempt {attempt + 1} left {left} reading"
+        for pip in pips:
+            assert writing_is_refused(pip.writer), "something still takes the old pipe's output"
+    finally:
+        for pip in pips:
+            if not pip.stdout.closed:
+                pip.stdout.close()
+            pip.held.set()
+
+
+def test_a_line_with_no_end_is_cut_rather_than_kept_whole(monkeypatch):
+    """Output with no line ends would all be kept, as one line."""
+    monkeypatch.setattr(gui, "LINE_LIMIT", 16, raising=False)
+    monkeypatch.setattr(gui.subprocess, "Popen", FakePip(["ERROR: " + "x" * 5000], code=1))
+    app = window()
+    app._pulse = lambda label: None
+    assert not app._install_packages("python")
+    assert [msg for msg, tag in app.logged if tag == "err"][-1] == "    ERROR: xxxxxxxxx"
 
 
 def test_a_pip_that_finished_is_not_held_by_output_left_open(monkeypatch):
