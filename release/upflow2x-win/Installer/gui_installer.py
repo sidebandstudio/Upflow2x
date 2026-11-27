@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import ctypes
 import io
 import locale
 import os
 import platform
 import re
-import select
 import shutil
 import signal
 import ssl
@@ -107,7 +107,6 @@ _NO_WINDOW = ({"creationflags": subprocess.CREATE_NO_WINDOW}
 # starts goes in a job object of its own on Windows, or a session of its own
 # elsewhere, and is ended with everything it started.
 if os.name == "nt":
-    import ctypes
     import msvcrt
     from ctypes import wintypes
 
@@ -150,11 +149,7 @@ def _start(args: list[str], **kwargs) -> tuple[subprocess.Popen, int | None]:
     it and, on Windows, its job object. Where Windows refuses the job, the
     child is ended before it has run, and _Uncontained says so."""
     if os.name != "nt":
-        child = subprocess.Popen(args, start_new_session=True, **kwargs, **_NO_WINDOW)
-        # Watched from the start, so its exit is seen with its status.
-        child._exit_watch = _watch_exit(child.pid) if sys.platform == "darwin" else None
-        child._exit_code = None
-        return child, None
+        return subprocess.Popen(args, start_new_session=True, **kwargs, **_NO_WINDOW), None
     child = subprocess.Popen(args, **kwargs,
                              creationflags=_NO_WINDOW["creationflags"] | _CREATE_SUSPENDED)
     job = _kernel32.CreateJobObjectW(None, None)
@@ -193,58 +188,53 @@ def _end(child: subprocess.Popen, job: int | None) -> None:
                 child.kill()
 
 
-# From macOS's <sys/event.h>, which Python's select doesn't name. With it a
-# kqueue reports a child's exit status along with its exit.
-_NOTE_EXITSTATUS = 0x04000000
+class _SigInfo(ctypes.Structure):
+    """siginfo_t as macOS's <sys/signal.h> lays it out, for its waitid."""
+    _fields_ = [("si_signo", ctypes.c_int), ("si_errno", ctypes.c_int),
+                ("si_code", ctypes.c_int), ("si_pid", ctypes.c_int32),
+                ("si_uid", ctypes.c_uint32), ("si_status", ctypes.c_int),
+                ("si_addr", ctypes.c_void_p), ("si_value", ctypes.c_void_p),
+                ("si_band", ctypes.c_int64), ("pad", ctypes.c_uint64 * 7)]
 
 
-def _watch_exit(pid: int):
-    """On macOS, a kqueue that reports when pid exits, and with what status,
-    without reaping it. None if pid had already begun to exit, which the
-    kernel refuses to watch, or no kqueue could be had. Then only reaping
-    pid tells its status."""
-    try:
-        watch = select.kqueue()
-    except OSError:
-        return None
-    try:
-        watch.control([select.kevent(pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD,
-                                     select.KQ_NOTE_EXIT | _NOTE_EXITSTATUS)], 0, 0)
-    except OSError:
-        watch.close()
-        return None
-    return watch
+# Python 3.12 and older have no os.waitid on macOS, though macOS has waitid,
+# so there setup calls it itself.
+if sys.platform == "darwin" and not hasattr(os, "waitid"):
+    _darwin_waitid = ctypes.CDLL(None, use_errno=True).waitid
+    _darwin_waitid.argtypes = (ctypes.c_int, ctypes.c_uint32, ctypes.POINTER(_SigInfo),
+                               ctypes.c_int)
 
 
 def _exit_status(child: subprocess.Popen) -> int | None:
-    """child's exit code once it has exited, else None. On macOS and Linux it
-    is read without reaping child, so until setup reaps it its ID still names
-    its process group, and setup can tell success from failure first."""
+    """child's exit code once it has exited, else None. On macOS and Linux
+    waitid reads it with WNOWAIT, which leaves child unreaped, so until setup
+    reaps it its ID still names its process group, and setup can tell
+    success from failure first."""
     if os.name == "nt" or child.returncode is not None:
         return child.poll()
-    if sys.platform != "darwin":
+    if hasattr(os, "waitid"):
         result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         if result is None:
             return None
-        return result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
-    if child._exit_watch is None:
-        # It couldn't be watched, so only reaping it tells its status.
-        return child.poll()
-    if child._exit_code is None:
-        events = child._exit_watch.control(None, 1, 0)
-        if not events:
+        code, status = result.si_code, result.si_status
+    else:
+        # macOS's P_PID, and WEXITED | WNOHANG | WNOWAIT. While child runs,
+        # waitid leaves info as it was, with no pid in it.
+        info = _SigInfo()
+        if _darwin_waitid(1, child.pid, ctypes.byref(info), 0x4 | 0x1 | 0x20) == -1:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        if not info.si_pid:
             return None
-        child._exit_code = os.waitstatus_to_exitcode(events[0].data)
-    return child._exit_code
+        code, status = info.si_code, info.si_status
+    # CLD_EXITED, 1 on macOS and Linux alike. Otherwise a signal ended it.
+    return status if code == 1 else -status
 
 
 def _let_go(child: subprocess.Popen) -> None:
     """Once nothing will signal child's group by its ID, reap child if it has
-    ended, so the ID can pass on, and stop watching it."""
+    ended, so the ID can pass on."""
     child.poll()
-    watch = getattr(child, "_exit_watch", None)
-    if watch is not None:
-        watch.close()
 
 
 def _close_job(job: int | None) -> None:
@@ -519,6 +509,11 @@ class InstallerApp:
         self._child: subprocess.Popen | None = None
         self._job: int | None = None
         self._worker: threading.Thread | None = None
+        # The step pip is on, for the label. The install thread only sets it,
+        # and _show_step shows it from the window's own thread. A call into
+        # the window from the install thread waits on the window, which must
+        # never hold up pip's deadline.
+        self._step: str | None = None
 
         self._build_ui()
 
@@ -678,6 +673,19 @@ class InstallerApp:
         self.install_btn.configure(state="disabled", bg="#555555", text="Installing...")
         self._worker = threading.Thread(target=self._run_install, daemon=True)
         self._worker.start()
+        self._show_step(self._worker)
+
+    def _show_step(self, worker: threading.Thread, shown: str | None = None):
+        """Show _step, looking every 100 ms while worker's install runs. A
+        step set between two looks is skipped. Once the install has finished,
+        or Try Again has started another, it stops."""
+        if worker is not self._worker or not self.installing:
+            return
+        step = self._step
+        if step and step != shown:
+            self._pulse(step)
+            shown = step
+        self.root.after(100, self._show_step, worker, shown)
 
     def _run_install(self):
         try:
@@ -979,15 +987,15 @@ class InstallerApp:
                     time.sleep(0.1)
                 status = _exit_status(proc)
                 running = status is None
-                # Only a pip still running at the deadline has timed out. That
-                # is settled before the label changes, which is a call into the
-                # window, so however much pip prints at once, the deadline holds.
+                # Only a pip still running at the deadline has timed out.
                 if running and not timed_out and time.monotonic() > deadline:
                     timed_out = True
                     self._stop(proc)
-                # The label shows the last step read.
+                # The label shows the last step read. Nothing here calls into
+                # the window, so however busy it is, or however much pip
+                # prints at once, the deadline holds.
                 if step:
-                    self.root.after(0, self._pulse, step)
+                    self._step = step
                 if running:
                     # A pip that won't end isn't waited on for good.
                     if timed_out and time.monotonic() > deadline + OUTPUT_GRACE:
@@ -1006,17 +1014,20 @@ class InstallerApp:
                 elif drained or time.monotonic() - ended > (OUTPUT_GRACE if status else 0):
                     break
         finally:
+            self._step = None
             proc.stdout.close()
             self._release(proc)
         self._check_quit()
-        # A pip that exited 0 as the deadline came has finished.
-        if timed_out and proc.returncode != 0:
+        # What pip was seen to exit with decides, not its return code, which
+        # is set only once pip is reaped, and letting go of it doesn't wait
+        # for that. A pip that exited 0 as the deadline came has finished.
+        if timed_out and status != 0:
             self.root.after(0, self._log, "  Timed out after 10 minutes.", "err")
             if not drained:
                 self.root.after(0, self._log, "  Something pip started is still running.",
                                 "err")
             return False
-        if proc.returncode != 0:
+        if status != 0:
             # pip's ERROR lines come last and say what went wrong. The first
             # 200 characters, shown before, could stop at a retry warning.
             lines = [line for line in tail if line.strip()]

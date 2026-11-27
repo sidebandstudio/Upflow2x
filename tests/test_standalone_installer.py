@@ -44,6 +44,7 @@ def setup(tmp_path, monkeypatch):
     app.install_done = False
     app._quit, app._child_lock, app._child, app._job, app._worker = (
         threading.Event(), threading.Lock(), None, None, None)
+    app._step = None
 
     def download_python():
         path = gui._embedded_python_exe(destination)
@@ -174,6 +175,7 @@ def window(**attrs):
     app.installing = app.install_done = False
     app._quit, app._child_lock, app._child, app._job, app._worker = (
         threading.Event(), threading.Lock(), None, None, None)
+    app._step = None
     app.logged = []
     app._log = lambda msg, tag=None: app.logged.append((msg, tag))
     for key, value in attrs.items():
@@ -206,14 +208,15 @@ class FakePip:
     and with held something pip started keeps the pipe's write end, writer,
     open after pip has ended, until held is set. With runs_for it exits by
     itself after that many seconds, and with at_once all its lines are in the
-    pipe before setup reads any."""
+    pipe before setup reads any. exited is the code it is seen to have exited
+    with, and with unreaped reaping it gives no return code yet."""
 
     def __init__(self, lines=(), code=0, hang=False, times_out=False, gate=None, held=None,
-                 runs_for=0, at_once=False):
+                 runs_for=0, at_once=False, unreaped=False):
         self.lines, self.code, self.hang = lines, code, hang
         self.times_out, self.gate, self.held = times_out, gate, held
-        self.runs_for, self.at_once = runs_for, at_once
-        self.returncode = None
+        self.runs_for, self.at_once, self.unreaped = runs_for, at_once, unreaped
+        self.returncode = self.exited = None
         self.killed = threading.Event()
         self.starting = threading.Event()
         self.args = self.kwargs = None
@@ -253,7 +256,9 @@ class FakePip:
                 assert self.killed.wait(5), "setup never gave up on pip"
             elif self.runs_for:
                 self.killed.wait(self.runs_for)
-            self.returncode = self.code
+            self.exited = self.code
+            if not self.unreaped:
+                self.returncode = self.code
             if self.held is not None:
                 self.held.wait(10)
         finally:
@@ -290,8 +295,8 @@ REAL_EXIT_STATUS = getattr(gui, "_exit_status", None)
 @pytest.fixture(autouse=True)
 def fakes_have_no_job(monkeypatch):
     """A FakePip has no process to put in a job or a process group, so it
-    starts as it is, ends when killed, and has an exit status once it has a
-    return code. Real children go the real way."""
+    starts as it is, ends when killed, and has an exit status once it is seen
+    to have exited, or has a return code. Real children go the real way."""
     def start(args, **kwargs):
         if isinstance(gui.subprocess.Popen, FakePip):
             return gui.subprocess.Popen(args, **kwargs), None
@@ -305,7 +310,7 @@ def fakes_have_no_job(monkeypatch):
 
     def exit_status(child):
         if isinstance(child, FakePip):
-            return child.poll()
+            return child.poll() if child.exited is None else child.exited
         return REAL_EXIT_STATUS(child)
 
     monkeypatch.setattr(gui, "_start", start)
@@ -329,6 +334,30 @@ def in_thread(call, *args):
     return thread, outcome
 
 
+def showing_steps(app, call, *args):
+    """What call returned or raised, run as setup's install thread runs it,
+    with the test as the window's thread, showing the step pip is on as
+    _show_step does, every 10 ms rather than 100, until call returns."""
+    looks = []
+    window_after = app.root.after
+
+    def after(delay, callback, *args):
+        if callback == app._show_step:
+            looks.append(args)
+        else:
+            window_after(delay, callback, *args)
+
+    app.root.after = after
+    app.installing = True
+    worker, outcome = in_thread(call, *args)
+    app._worker = worker
+    app._show_step(worker)
+    while worker.is_alive():
+        time.sleep(0.01)
+        app._show_step(*looks.pop())
+    return outcome[0]
+
+
 PIP_OUTPUT = [
     "Collecting numpy (from -r requirements.txt (line 1))",
     "  Downloading numpy-2.1.0-cp311-cp311-win_amd64.whl (12.9 MB)",
@@ -342,12 +371,13 @@ PIP_OUTPUT = [
 def test_the_bar_keeps_moving_while_pip_installs(monkeypatch):
     """A minute or two at 40% with no change looked like setup had hung, and
     people closed it."""
-    pip = FakePip(PIP_OUTPUT)
+    pip = FakePip(PIP_OUTPUT, runs_for=0.3)
     monkeypatch.setattr(gui.subprocess, "Popen", pip)
     app = window()
     pulses = []
     app._pulse = pulses.append
-    assert app._install_packages("python")
+    assert showing_steps(app, app._install_packages, "python")
+    assert app._step is None
     steps = ["Installing packages...", "Getting numpy...",
              "Downloading numpy (12.9 MB)...", "Getting opencv-python...",
              "Downloading opencv_python (38.8 MB)...",
@@ -850,7 +880,7 @@ def test_a_full_install_with_real_children_finishes_and_leaves_nothing(setup, ch
     pulses = []
     app._pulse = pulses.append
     children.lifetime = 0.3
-    app._do_install()
+    showing_steps(app, app._do_install)
     assert app.install_done
     assert "Getting numpy..." in pulses
     conf = dict(line.split("=", 1) for line in
@@ -1179,6 +1209,33 @@ def test_a_pip_that_ended_with_its_output_held_is_ended_with_its_group_only_if_i
     assert app._child is None
 
 
+@pytest.mark.parametrize("code", [0, 1])
+def test_how_pip_was_seen_to_exit_decides_before_it_can_be_reaped(monkeypatch, code):
+    """A kqueue on macOS showed pip's exit before reaping pip gave an exit
+    code. Setup let go of a pip seen to exit 0, with output still to read,
+    found no exit code and said pip had failed. A failed pip's group is
+    ended once, as the failure is seen, and letting go of pip neither ends
+    it again nor waits on it."""
+    held = threading.Event()
+    pip = FakePip(PIP_OUTPUT, code=code, held=held, unreaped=True)
+    monkeypatch.setattr(gui.subprocess, "Popen", pip)
+    monkeypatch.setattr(gui, "OUTPUT_GRACE", 0.3)
+    ends = []
+    monkeypatch.setattr(gui, "_end", lambda child, job: ends.append(child) or child.kill())
+    app = window()
+    app._pulse = lambda label: None
+    worker, outcome = in_thread(app._install_packages, "python")
+    try:
+        worker.join(5)
+        assert not worker.is_alive()
+    finally:
+        held.set()
+    assert outcome == [code == 0]
+    assert ends == ([pip] if code else [])
+    assert pip.returncode is None, "setup waited to reap pip"
+    assert any(tag == "err" for _, tag in app.logged) is bool(code)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX, Windows uses job objects")
 @pytest.mark.parametrize("group", ["pip's group", "a group of its own"])
 def test_a_failed_pip_leaves_no_build_running_in_its_group(children, monkeypatch, group):
@@ -1224,10 +1281,81 @@ def test_a_burst_of_progress_cannot_put_off_the_deadline(monkeypatch, pip_runs_f
     app.root.after = slow_after
     pulses = []
     app._pulse = pulses.append
-    assert app._install_packages("python") is finished
+    assert showing_steps(app, app._install_packages, "python") is finished
     assert pip.killed.is_set() is not finished
     assert (("  Timed out after 10 minutes.", "err") in app.logged) is not finished
     assert pulses[-1] == "Getting x..." and len(pulses) < 10
+
+
+@pytest.mark.parametrize("lifetime,timeout,finished", [(0.8, 0.3, False), (0.1, 5, True)],
+                         ids=["running at the deadline", "done before it"])
+def test_a_busy_window_cannot_put_off_the_deadline(children, monkeypatch, lifetime, timeout,
+                                                   finished):
+    """Setup showed the step pip was on with a call into the window, which
+    waits until the window's thread has taken it. With the window busy for a
+    second, a pip still running at its deadline had finished by the time
+    setup looked again, and counted as done in time."""
+    monkeypatch.setattr(gui, "PIP_TIMEOUT", timeout)
+    children.lifetime = lifetime
+    ended = []
+
+    def end(child, job):
+        ended.append(time.monotonic())
+        REAL_END(child, job)
+
+    monkeypatch.setattr(gui, "_end", end)
+    app = window()
+    app._pulse = lambda label: None
+
+    def busy(delay, callback, *args):
+        if children.folders:  # pip has started
+            time.sleep(1.15)
+        callback(*args)
+
+    app.root.after = busy
+    began = time.monotonic()
+    assert app._install_packages(sys.executable) is finished
+    if finished:
+        assert not ended and time.monotonic() - began < 1.15, "setup waited on the window"
+    else:
+        assert len(ended) == 1 and ended[0] - began < 1.15, "pip was ended once the window was free"
+        assert ("  Timed out after 10 minutes.", "err") in app.logged
+    assert app._step is None
+
+
+def test_the_window_shows_the_latest_step_and_none_once_the_attempt_is_over():
+    """The install thread only sets the step pip is on, and the window's own
+    thread shows it, so a busy window holds up nothing. Steps set between
+    two looks are skipped, and none is shown once the attempt has finished
+    or Try Again has started another."""
+    looks = []
+    app = window()
+    app.root.after = lambda delay, callback, *args: looks.append((callback, args))
+    app._run_install = lambda: None
+    pulses = []
+    app._pulse = pulses.append
+
+    def look():
+        callback, args = looks.pop(0)
+        callback(*args)
+
+    app._start_install()
+    app._step = "Getting numpy..."
+    app._step = "Getting opencv-python..."
+    look()
+    look()
+    assert pulses == ["Getting opencv-python..."]
+    app._step = None  # pip is done
+    look()
+    app._on_finish()  # it failed
+    app._start_install()  # Try Again, before the first attempt's next look
+    app._step = "Getting numpy..."
+    look()
+    look()
+    assert pulses == ["Getting opencv-python...", "Getting numpy..."]
+    app._on_finish()
+    look()
+    assert looks == [] and len(pulses) == 2
 
 
 class Leader:
@@ -1239,7 +1367,6 @@ class Leader:
     def __init__(self, returncode=None, ended=None):
         self.pid, self.returncode, self.ended = 4242, returncode, ended
         self._waitpid_lock = threading.Lock()
-        self._exit_watch = self._exit_code = None
 
     def poll(self):
         if self.returncode is None and self.ended is not None:
@@ -1319,60 +1446,63 @@ def test_on_linux_pips_exit_status_is_read_without_reaping_it(monkeypatch):
     assert all(pid == 4242 and options & 0x1000000 and options & 1 for _, pid, options in calls)
 
 
-class Kqueue:
-    """select.kqueue as macOS gives it, holding the events the test gives it."""
+def test_on_older_macos_pips_exit_status_is_read_without_reaping_it(posix, monkeypatch):
+    """Python 3.12 and older have no os.waitid on macOS, so setup calls
+    macOS's own waitid, with WNOWAIT. It tells how pip ended, even a pip that
+    exited before setup first looked, and leaves pip unreaped, so its ID
+    still names its group when setup ends that after a failure. A kqueue
+    watch was refused once pip had begun to exit, and then only reaping pip
+    told its status."""
+    import ctypes
+    calls, ended = [], []
 
-    def __init__(self, refuse=False):
-        self.refuse, self.changes, self.events, self.closed = refuse, [], [], False
+    def waitid(idtype, pid, info, options):
+        """macOS's waitid: a zombie child's status, left to reap with
+        WNOWAIT, and info left as it was while the child runs."""
+        calls.append((idtype, pid, options))
+        if ended:
+            siginfo = info._obj
+            siginfo.si_pid, siginfo.si_code, siginfo.si_status = pid, *ended[-1]
+        return 0
 
-    def control(self, changes, max_events, timeout=None):
-        if changes:
-            if self.refuse:
-                raise ProcessLookupError(3, "No such process")
-            self.changes.extend(changes)
-            return []
-        assert max_events == 1 and timeout == 0, "setup waited on the kqueue"
-        events, self.events = self.events, []
-        return events
-
-    def close(self):
-        self.closed = True
-
-
-def test_on_macos_pips_exit_status_comes_from_a_kqueue_without_reaping_it(monkeypatch):
-    """Python 3.12 and older have no os.waitid on macOS. A kqueue that has
-    watched pip from its start gives its exit status on any Python, with
-    pip still unreaped. One that pip had begun to exit before is refused,
-    and then only reaping tells the status."""
-    queues = []
-
-    def kqueue():
-        queues.append(Kqueue(refuse=refusing))
-        return queues[-1]
-
-    monkeypatch.setattr(gui, "select", SimpleNamespace(
-        KQ_FILTER_PROC=-5, KQ_EV_ADD=1, KQ_NOTE_EXIT=0x80000000, kqueue=kqueue,
-        kevent=lambda ident, filter, flags, fflags: (ident, filter, flags, fflags)))
+    monkeypatch.setattr(gui, "_darwin_waitid", waitid, raising=False)
     monkeypatch.setattr(gui, "sys", SimpleNamespace(platform="darwin"))
-    monkeypatch.setattr(gui, "os", SimpleNamespace(
-        name="posix", waitstatus_to_exitcode=os.waitstatus_to_exitcode))
-    refusing = False
     leader = Leader()
-    leader._exit_watch = gui._watch_exit(leader.pid)
-    assert queues[0].changes == [(4242, -5, 1, 0x80000000 | 0x04000000)]
     assert gui._exit_status(leader) is None
-    queues[0].events = [SimpleNamespace(data=3 << 8)]  # exit code 3, packed as wait(2) does
-    assert gui._exit_status(leader) == 3
-    assert gui._exit_status(leader) == 3, "the status was lost once read"
+    ended.append((1, 1))  # CLD_EXITED, with exit code 1
+    assert gui._exit_status(leader) == 1
     assert leader.returncode is None, "setup reaped pip to read its status"
-    gui._let_go(leader)
-    assert queues[0].closed
+    gui._end(leader, None)
+    assert posix == [(4242, 9)], "the failed pip's group was not ended"
+    ended.append((2, 9))  # CLD_KILLED, by SIGKILL
+    assert gui._exit_status(leader) == -9
+    # P_PID, and WEXITED | WNOHANG | WNOWAIT, as macOS's <sys/wait.h> has them.
+    assert calls == [(1, 4242, 0x4 | 0x1 | 0x20)] * 3
+    # siginfo_t as macOS's <sys/signal.h> lays it out.
+    assert [getattr(gui._SigInfo, name).offset
+            for name in ("si_code", "si_pid", "si_status")] == [8, 12, 20]
+    assert ctypes.sizeof(gui._SigInfo) == 104
 
-    refusing = True
-    late = Leader(ended=0)
-    late._exit_watch = gui._watch_exit(late.pid)
-    assert late._exit_watch is None and queues[1].closed
-    assert gui._exit_status(late) == 0 and late.returncode == 0
+
+@pytest.mark.skipif(os.name == "nt", reason="reaping is POSIX")
+@pytest.mark.parametrize("ending", ["exit 3", "killed"])
+def test_a_real_childs_exit_status_is_read_without_reaping_it(ending):
+    """With the system's own waitid: os.waitid on Linux and on macOS from
+    Python 3.13, macOS's through ctypes before that."""
+    code = "import sys; sys.exit(3)" if ending == "exit 3" else "import time; time.sleep(30)"
+    child, job = gui._start([sys.executable, "-c", code])
+    try:
+        if ending == "killed":
+            gui._end(child, job)
+        deadline = time.monotonic() + 10
+        while (status := gui._exit_status(child)) is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert status == (3 if ending == "exit 3" else -9)
+        assert child.returncode is None, "reading the status reaped the child"
+        assert child.poll() == status, "the child was not left to reap"
+    finally:
+        gui._end(child, job)
+        child.wait()
 
 
 def test_a_pip_that_succeeded_returns_at_once_with_its_output_held(monkeypatch):
